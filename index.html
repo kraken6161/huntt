@@ -1,0 +1,832 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Ördek Avı — Prototip</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #0a0d14; color: #e8eef7;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    overflow: hidden; overscroll-behavior: none;
+    -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent;
+  }
+  #stage {
+    position: relative;
+    width: 100%; max-width: 520px;
+    height: 100vh; height: 100dvh;
+    margin: 0 auto;
+    background: #101827;
+    box-shadow: 0 0 60px rgba(0,0,0,.6);
+    overflow: hidden;
+  }
+  canvas#game { display: block; width: 100%; height: 100%; touch-action: none; }
+
+  /* ---- debug panel ---- */
+  #dbgToggle {
+    position: absolute; top: 8px; right: 8px; z-index: 20;
+    width: 38px; height: 38px; border-radius: 10px;
+    border: 1px solid rgba(255,255,255,.25);
+    background: rgba(10,14,22,.65); color: #cfe0f5;
+    font-size: 18px; line-height: 1; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    backdrop-filter: blur(4px);
+  }
+  #dbgToggle:active { transform: scale(.94); }
+  #dbgPanel {
+    position: absolute; top: 52px; right: 8px; z-index: 19;
+    width: min(268px, calc(100% - 16px));
+    max-height: calc(100% - 70px); overflow-y: auto;
+    padding: 10px 12px 14px;
+    background: rgba(9,13,20,.92);
+    border: 1px solid rgba(255,255,255,.16); border-radius: 12px;
+    font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    backdrop-filter: blur(6px);
+    -webkit-overflow-scrolling: touch;
+  }
+  #dbgPanel[hidden] { display: none; }
+  #dbgPanel h3 {
+    margin: 0 0 8px; font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+    color: #7fd4ff; font-weight: 700;
+  }
+  .dbg-stats {
+    margin-bottom: 10px; padding: 6px 8px; border-radius: 8px;
+    background: rgba(127,212,255,.08); color: #9fb6d0;
+  }
+  .dbg-stats span { color: #e8eef7; }
+  .dbg-group {
+    margin: 10px 0 4px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,.1);
+    color: #6f8098; letter-spacing: .1em; text-transform: uppercase; font-size: 9px;
+  }
+  .dbg-row { margin: 7px 0; }
+  .dbg-row label {
+    display: flex; justify-content: space-between; gap: 8px;
+    color: #b9c9dd; margin-bottom: 3px;
+  }
+  .dbg-row label b { color: #ffd166; font-weight: 600; }
+  .dbg-row input[type=range] {
+    width: 100%; height: 20px; margin: 0; accent-color: #7fd4ff; background: transparent;
+  }
+  .dbg-btns { display: flex; gap: 6px; margin-top: 12px; }
+  .dbg-btns button {
+    flex: 1; padding: 7px 4px; border-radius: 8px; cursor: pointer;
+    border: 1px solid rgba(255,255,255,.2); background: rgba(255,255,255,.07);
+    color: #dbe7f5; font: inherit;
+  }
+  .dbg-btns button:active { background: rgba(255,255,255,.16); }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="game"></canvas>
+  <button id="dbgToggle" aria-label="Debug paneli">⚙</button>
+  <div id="dbgPanel" hidden></div>
+</div>
+
+<script>
+"use strict";
+
+/* =========================================================================
+   CONFIG — tüm ayarlanabilir değerler burada. Debug panelindeki slider'lar
+   doğrudan bu objeyi canlı olarak değiştirir.
+   ========================================================================= */
+const CONFIG = {
+  duck: {
+    speed:          170,   // temel uçuş hızı (px/sn)
+    speedJitter:    0.25,  // ördek başına hız rastgeleliği (0..1 oranı)
+    width:          54,    // gövde genişliği (px)
+    height:         34,    // gövde yüksekliği (px)
+    waveAmplitude:  62,    // sinüs yolunun genliği (px)
+    waveFrequency:  0.65,  // sinüs yolunun frekansı (Hz)
+    hitPadding:     12,    // isabet kutusuna eklenen tolerans (px)
+    fallGravity:    1500,  // düşerken yerçekimi (px/sn²)
+    fallSpin:       7      // düşerken dönme hızı (rad/sn)
+  },
+  spawn: {
+    interval:       1150,  // ördekler arası temel süre (ms)
+    intervalJitter: 0.35,  // spawn süresinin rastgeleliği (0..1 oranı)
+    firstDelay:     450,   // tur başındaki ilk gecikme (ms)
+    minInterval:    220    // zorluk artsa da inilebilecek en düşük süre (ms)
+  },
+  round: {
+    ducksPerRound:   5,    // tur başına ördek
+    bulletsPerRound: 3,    // tur başına mermi
+    endDelay:        900,  // son olaydan sonra tur bitiş bekleme süresi (ms)
+    breakDuration:   2200  // tur arası özet ekranı süresi (ms)
+  },
+  combo: {
+    increment: 0.5,        // her üst üste isabette çarpana eklenen değer
+    max:       5.0         // combo çarpanı üst sınırı
+  },
+  score: {
+    perDuck: 100           // bir ördeğin temel puanı (combo ile çarpılır)
+  },
+  difficulty: {
+    speedGrowth: 0.12,     // her turda hız artış oranı (tur başına %)
+    spawnGrowth: 0.08      // her turda spawn aralığının kısalma oranı
+  }
+};
+
+/* Debug panelinde gösterilecek slider'lar (CONFIG içindeki yollara bağlı) */
+const SLIDERS = [
+  { group: "Ördek" },
+  { path: "duck.speed",              label: "Hız (px/sn)",        min: 40,  max: 600,  step: 5 },
+  { path: "duck.speedJitter",        label: "Hız rastgeleliği",   min: 0,   max: 1,    step: 0.05 },
+  { path: "duck.width",              label: "Genişlik",           min: 20,  max: 140,  step: 2 },
+  { path: "duck.height",             label: "Yükseklik",          min: 12,  max: 100,  step: 2 },
+  { path: "duck.waveAmplitude",      label: "Sinüs genliği",      min: 0,   max: 220,  step: 2 },
+  { path: "duck.waveFrequency",      label: "Sinüs frekansı (Hz)",min: 0,   max: 3,    step: 0.05 },
+  { path: "duck.hitPadding",         label: "İsabet toleransı",   min: 0,   max: 60,   step: 1 },
+  { group: "Spawn" },
+  { path: "spawn.interval",          label: "Aralık (ms)",        min: 150, max: 3000, step: 25 },
+  { path: "spawn.intervalJitter",    label: "Aralık rastgeleliği",min: 0,   max: 1,    step: 0.05 },
+  { group: "Tur" },
+  { path: "round.ducksPerRound",     label: "Tur başına ördek",   min: 1,   max: 20,   step: 1 },
+  { path: "round.bulletsPerRound",   label: "Tur başına mermi",   min: 1,   max: 15,   step: 1 },
+  { group: "Combo & Skor" },
+  { path: "combo.increment",         label: "Combo artışı",       min: 0,   max: 2,    step: 0.1 },
+  { path: "combo.max",               label: "Combo üst sınırı",   min: 1,   max: 15,   step: 0.5 },
+  { path: "score.perDuck",           label: "Ördek puanı",        min: 10,  max: 1000, step: 10 },
+  { group: "Zorluk artışı" },
+  { path: "difficulty.speedGrowth",  label: "Tur hız artışı",     min: 0,   max: 0.5,  step: 0.01 },
+  { path: "difficulty.spawnGrowth",  label: "Tur spawn hızlanması",min: 0,  max: 0.5,  step: 0.01 }
+];
+
+const DEFAULTS = JSON.parse(JSON.stringify(CONFIG));
+
+/* ========================== yardımcılar ========================== */
+const rand  = (a, b) => a + Math.random() * (b - a);
+const pick  = arr => arr[(Math.random() * arr.length) | 0];
+const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
+const getPath = (obj, path) => path.split(".").reduce((o, k) => o[k], obj);
+const setPath = (obj, path, val) => {
+  const keys = path.split("."), last = keys.pop();
+  keys.reduce((o, k) => o[k], obj)[last] = val;
+};
+
+const DUCK_COLORS = [
+  { body: "#e0603c", wing: "#ffb454", head: "#3d7f4f" },
+  { body: "#5b7fd4", wing: "#9ec1ff", head: "#2c3f78" },
+  { body: "#c94f8b", wing: "#ffa8cf", head: "#5c2a4c" },
+  { body: "#7bbf5a", wing: "#cdf0a1", head: "#2f6b3d" },
+  { body: "#d4b23c", wing: "#fff0a8", head: "#6e5416" }
+];
+
+/* ========================== canvas kurulumu ========================== */
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let W = 0, H = 0, DPR = 1, S = 1; // S = ölçek katsayısı (referans genişlik 400px)
+
+function resize() {
+  const r = canvas.getBoundingClientRect();
+  DPR = Math.min(window.devicePixelRatio || 1, 3);
+  W = Math.round(r.width);
+  H = Math.round(r.height);
+  canvas.width = Math.round(W * DPR);
+  canvas.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  S = clamp(W / 400, 0.75, 1.8);
+}
+window.addEventListener("resize", resize);
+window.addEventListener("orientationchange", () => setTimeout(resize, 120));
+
+/* ========================== oyun durumu ========================== */
+const STATE = { READY: "ready", PLAYING: "playing", ROUNDOVER: "roundover" };
+
+const game = {
+  state: STATE.READY,
+  round: 1,
+  score: 0,
+  combo: 1,
+  bestCombo: 1,
+  bullets: 0,
+  ducks: [],
+  shots: [],      // isabet/ıska işaretleri
+  popups: [],     // uçuşan puan yazıları
+  clouds: [],
+  spawnTimer: 0,
+  spawned: 0,
+  resolved: 0,    // vurulan + kaçan
+  roundHits: 0,
+  roundShots: 0,
+  roundDucks: 5,
+  roundBullets: 3,
+  endTimer: -1,   // >=0 ise tur bitişi geri sayımı (sn)
+  breakTimer: 0,
+  inputLock: 0,
+  crosshair: null,
+  fps: 0
+};
+
+const speedMul = () => Math.pow(1 + CONFIG.difficulty.speedGrowth, game.round - 1);
+const spawnMul = () => Math.max(0.12, Math.pow(1 - CONFIG.difficulty.spawnGrowth, game.round - 1));
+const spawnDelay = () => {
+  const base = CONFIG.spawn.interval * spawnMul();
+  const j = CONFIG.spawn.intervalJitter;
+  return Math.max(CONFIG.spawn.minInterval, base * (1 + rand(-j, j))) / 1000;
+};
+
+function makeClouds() {
+  game.clouds = [];
+  for (let i = 0; i < 5; i++) {
+    game.clouds.push({
+      x: rand(-60, W), y: rand(H * 0.06, H * 0.45),
+      w: rand(50, 130), h: rand(10, 20), v: rand(4, 14), a: rand(0.05, 0.13)
+    });
+  }
+}
+
+/* ========================== ördekler ========================== */
+function spawnDuck() {
+  const c = CONFIG.duck;
+  const margin = Math.max(c.width, c.height) + c.waveAmplitude + 30;
+  const speed = Math.max(20, c.speed * speedMul() * (1 + rand(-c.speedJitter, c.speedJitter)));
+  const edge = pick(["bottom", "bottom", "left", "right"]);
+  let ox, oy, dir;
+
+  if (edge === "bottom") {
+    ox = rand(W * 0.12, W * 0.88);
+    oy = H + margin * 0.5;
+    const a = rand(-0.55, 0.55);              // dikeyden sapma
+    dir = { x: Math.sin(a), y: -Math.cos(a) };
+  } else {
+    const fromLeft = edge === "left";
+    ox = fromLeft ? -margin : W + margin;
+    oy = rand(H * 0.16, H * 0.70);
+    const a = rand(0.05, 0.45);               // hafif yukarı doğru
+    dir = { x: (fromLeft ? 1 : -1) * Math.cos(a), y: -Math.sin(a) };
+  }
+
+  game.ducks.push({
+    ox, oy, dir,
+    perp: { x: -dir.y, y: dir.x },
+    x: ox, y: oy, px: ox,
+    speed, phase: rand(0, Math.PI * 2), age: 0,
+    flap: rand(0, Math.PI * 2),
+    colors: pick(DUCK_COLORS),
+    alive: true, falling: false,
+    vx: 0, vy: 0, rot: 0, spin: 0,
+    entered: false
+  });
+  game.spawned++;
+}
+
+function updateDucks(dt) {
+  const c = CONFIG.duck;
+  for (let i = game.ducks.length - 1; i >= 0; i--) {
+    const d = game.ducks[i];
+    d.px = d.x;
+
+    if (d.falling) {
+      d.vy += c.fallGravity * dt;
+      d.x += d.vx * dt;
+      d.y += d.vy * dt;
+      d.rot += d.spin * dt;
+      if (d.y - c.height > H + 80) game.ducks.splice(i, 1);
+      continue;
+    }
+
+    d.age += dt;
+    d.flap += dt * 12;
+    const travel = d.speed * d.age;
+    const off = c.waveAmplitude * Math.sin(2 * Math.PI * c.waveFrequency * d.age + d.phase);
+    d.x = d.ox + d.dir.x * travel + d.perp.x * off;
+    d.y = d.oy + d.dir.y * travel + d.perp.y * off;
+
+    const m = Math.max(c.width, c.height);
+    const inside = d.x > -m && d.x < W + m && d.y > -m && d.y < H + m;
+    if (inside) d.entered = true;
+
+    const gone = d.y < -m * 1.6 || d.x < -m * 1.6 || d.x > W + m * 1.6 || d.y > H + m * 3;
+    if ((d.entered && gone) || d.age > 18) {
+      game.ducks.splice(i, 1);
+      game.resolved++;
+      addPopup(clamp(d.x, 40, W - 40), clamp(d.y, 60, H - 60), "KAÇTI", "#8fa3bd", 0.85);
+    }
+  }
+}
+
+function duckRect(d) {
+  const c = CONFIG.duck, p = c.hitPadding;
+  return { x: d.x - c.width / 2 - p, y: d.y - c.height / 2 - p, w: c.width + p * 2, h: c.height + p * 2 };
+}
+
+/* ========================== ateş etme ========================== */
+function shoot(x, y) {
+  game.bullets--;
+  game.roundShots++;
+
+  let hit = null;
+  for (let i = game.ducks.length - 1; i >= 0; i--) {         // en yeni ördek önde
+    const d = game.ducks[i];
+    if (!d.alive || d.falling) continue;
+    const r = duckRect(d);
+    if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) { hit = d; break; }
+  }
+
+  if (hit) {
+    hit.falling = true;
+    hit.alive = false;
+    hit.vx = (hit.x - hit.px) * 6;
+    hit.vy = -110;
+    hit.spin = (Math.random() < 0.5 ? -1 : 1) * CONFIG.duck.fallSpin;
+    game.resolved++;
+    game.roundHits++;
+
+    const gain = Math.round(CONFIG.score.perDuck * game.combo);
+    game.score += gain;
+    addPopup(hit.x, hit.y - 18, "+" + gain + (game.combo > 1 ? "  x" + fmt(game.combo) : ""), "#ffd166", 1.1);
+    game.combo = clamp(game.combo + CONFIG.combo.increment, 1, CONFIG.combo.max);
+    game.bestCombo = Math.max(game.bestCombo, game.combo);
+    game.shots.push({ x, y, age: 0, hit: true });
+  } else {
+    game.combo = 1;
+    game.shots.push({ x, y, age: 0, hit: false });
+    addPopup(x, y - 14, "ISKA", "#ff7b6b", 0.8);
+  }
+
+  if (game.bullets <= 0 && game.endTimer < 0) game.endTimer = CONFIG.round.endDelay / 1000;
+}
+
+function addPopup(x, y, text, color, scale) {
+  game.popups.push({ x, y, text, color, scale: scale || 1, life: 0, ttl: 0.9 });
+}
+
+/* ========================== tur akışı ========================== */
+function startRound() {
+  game.roundDucks = Math.max(1, Math.round(CONFIG.round.ducksPerRound));
+  game.roundBullets = Math.max(1, Math.round(CONFIG.round.bulletsPerRound));
+  game.bullets = game.roundBullets;
+  game.ducks.length = 0;
+  game.spawned = 0;
+  game.resolved = 0;
+  game.roundHits = 0;
+  game.roundShots = 0;
+  game.endTimer = -1;
+  game.spawnTimer = CONFIG.spawn.firstDelay / 1000;
+  game.state = STATE.PLAYING;
+  game.inputLock = 0.2;
+}
+
+function endRound() {
+  game.state = STATE.ROUNDOVER;
+  game.breakTimer = CONFIG.round.breakDuration / 1000;
+  game.inputLock = 0.35;
+}
+
+function nextRound() {
+  game.round++;
+  game.state = STATE.READY;
+  game.ducks.length = 0;
+  game.inputLock = 0.2;
+}
+
+function resetGame() {
+  game.round = 1; game.score = 0; game.combo = 1; game.bestCombo = 1;
+  game.ducks.length = 0; game.shots.length = 0; game.popups.length = 0;
+  game.state = STATE.READY; game.inputLock = 0.2;
+}
+
+function updateRound(dt) {
+  if (game.state !== STATE.PLAYING) return;
+
+  if (game.endTimer < 0 && game.spawned < game.roundDucks) {
+    game.spawnTimer -= dt;
+    if (game.spawnTimer <= 0) {
+      spawnDuck();
+      game.spawnTimer = spawnDelay();
+    }
+  }
+
+  // tüm ördekler çözüldüyse (vuruldu ya da kaçtı) tur biter
+  if (game.endTimer < 0 && game.spawned >= game.roundDucks && game.resolved >= game.roundDucks) {
+    game.endTimer = CONFIG.round.endDelay / 1000;
+  }
+
+  if (game.endTimer >= 0) {
+    game.endTimer -= dt;
+    if (game.endTimer <= 0) endRound();
+  }
+}
+
+/* ========================== girdi (dokunma + fare) ========================== */
+function pointerPos(e) {
+  const r = canvas.getBoundingClientRect();
+  return { x: e.clientX - r.left, y: e.clientY - r.top };
+}
+
+function handlePress(x, y) {
+  if (game.inputLock > 0) return;
+  if (game.state === STATE.READY) { startRound(); return; }
+  if (game.state === STATE.ROUNDOVER) { nextRound(); return; }
+  if (game.state === STATE.PLAYING && game.bullets > 0 && game.endTimer < 0) shoot(x, y);
+}
+
+if (window.PointerEvent) {
+  canvas.addEventListener("pointerdown", e => {
+    e.preventDefault();
+    const p = pointerPos(e);
+    if (e.pointerType === "mouse") game.crosshair = p;
+    handlePress(p.x, p.y);
+  });
+  canvas.addEventListener("pointermove", e => {
+    if (e.pointerType === "mouse") game.crosshair = pointerPos(e);
+  });
+  canvas.addEventListener("pointerleave", e => {
+    if (e.pointerType === "mouse") game.crosshair = null;
+  });
+} else {
+  canvas.addEventListener("touchstart", e => {
+    e.preventDefault();
+    const t = e.changedTouches[0], r = canvas.getBoundingClientRect();
+    handlePress(t.clientX - r.left, t.clientY - r.top);
+  }, { passive: false });
+  canvas.addEventListener("mousedown", e => {
+    const p = pointerPos(e);
+    game.crosshair = p;
+    handlePress(p.x, p.y);
+  });
+  canvas.addEventListener("mousemove", e => { game.crosshair = pointerPos(e); });
+}
+document.addEventListener("contextmenu", e => e.preventDefault());
+document.addEventListener("gesturestart", e => e.preventDefault());
+
+/* ========================== çizim ========================== */
+const fmt = n => (Math.round(n * 10) / 10).toFixed(1).replace(/\.0$/, "");
+
+function drawBackground(dt) {
+  const groundY = H * 0.86;
+  const sky = ctx.createLinearGradient(0, 0, 0, groundY);
+  sky.addColorStop(0, "#152444");
+  sky.addColorStop(0.55, "#39598c");
+  sky.addColorStop(1, "#e2925a");
+  ctx.fillStyle = sky;
+  ctx.fillRect(0, 0, W, groundY);
+
+  // güneş (kare)
+  ctx.fillStyle = "rgba(255,214,140,.35)";
+  ctx.fillRect(W * 0.62, groundY - 110 * S, 70 * S, 70 * S);
+
+  // bulutlar
+  for (const c of game.clouds) {
+    c.x += c.v * dt;
+    if (c.x > W + 140) { c.x = -140; c.y = rand(H * 0.06, H * 0.45); }
+    ctx.fillStyle = "rgba(255,255,255," + c.a + ")";
+    ctx.fillRect(c.x, c.y, c.w, c.h);
+    ctx.fillRect(c.x + c.w * 0.25, c.y - c.h * 0.6, c.w * 0.5, c.h * 0.7);
+  }
+
+  // yer
+  ctx.fillStyle = "#123027";
+  ctx.fillRect(0, groundY, W, H - groundY);
+  ctx.fillStyle = "#1b4534";
+  for (let x = 0; x < W; x += 14) {
+    const h = 10 + ((x * 37) % 22);
+    ctx.fillRect(x, groundY - h * 0.5, 8, h);
+  }
+  ctx.fillStyle = "#0d211b";
+  ctx.fillRect(0, H - 26 * S, W, 26 * S);
+}
+
+function drawDuck(d) {
+  const c = CONFIG.duck;
+  const w = c.width, h = c.height;
+  const facing = (d.x - d.px) >= 0 ? 1 : -1;
+  const col = d.colors;
+
+  ctx.save();
+  ctx.translate(d.x, d.y);
+  ctx.rotate(d.rot);
+  ctx.scale(facing, 1);
+  if (d.falling) ctx.globalAlpha = 0.85;
+
+  // gölge / dış hat
+  ctx.fillStyle = "rgba(0,0,0,.25)";
+  ctx.fillRect(-w / 2 + 3, -h / 2 + 3, w, h);
+
+  // gövde
+  ctx.fillStyle = d.falling ? "#8a8f98" : col.body;
+  ctx.fillRect(-w / 2, -h / 2, w, h);
+
+  // kanat (çırpınma)
+  const flap = d.falling ? -h * 0.15 : Math.sin(d.flap) * h * 0.3;
+  ctx.fillStyle = d.falling ? "#b8bec7" : col.wing;
+  ctx.fillRect(-w * 0.28, -h * 0.12 + flap, w * 0.46, h * 0.4);
+
+  // baş
+  ctx.fillStyle = d.falling ? "#6f747c" : col.head;
+  ctx.fillRect(w * 0.22, -h * 0.95, w * 0.34, h * 0.62);
+
+  // gaga
+  ctx.fillStyle = "#ffb03a";
+  ctx.fillRect(w * 0.54, -h * 0.66, w * 0.22, h * 0.16);
+
+  // göz
+  ctx.fillStyle = "#0d1016";
+  if (d.falling) {
+    ctx.fillRect(w * 0.30, -h * 0.80, w * 0.12, 2.5);
+    ctx.fillRect(w * 0.34, -h * 0.86, 2.5, w * 0.12);
+  } else {
+    ctx.fillRect(w * 0.36, -h * 0.78, w * 0.09, w * 0.09);
+  }
+
+  // kuyruk
+  ctx.fillStyle = d.falling ? "#8a8f98" : col.wing;
+  ctx.fillRect(-w * 0.62, -h * 0.28, w * 0.14, h * 0.34);
+
+  ctx.restore();
+}
+
+function drawShots(dt) {
+  for (let i = game.shots.length - 1; i >= 0; i--) {
+    const s = game.shots[i];
+    s.age += dt;
+    const t = s.age / 0.35;
+    if (t >= 1) { game.shots.splice(i, 1); continue; }
+    const size = (14 + t * 34) * S;
+    ctx.save();
+    ctx.globalAlpha = 1 - t;
+    ctx.strokeStyle = s.hit ? "#ffd166" : "#ff7b6b";
+    ctx.lineWidth = 3 * S;
+    ctx.strokeRect(s.x - size / 2, s.y - size / 2, size, size);
+    ctx.restore();
+  }
+}
+
+function drawPopups(dt) {
+  for (let i = game.popups.length - 1; i >= 0; i--) {
+    const p = game.popups[i];
+    p.life += dt;
+    if (p.life >= p.ttl) { game.popups.splice(i, 1); continue; }
+    const k = p.life / p.ttl;
+    ctx.save();
+    ctx.globalAlpha = 1 - k * k;
+    ctx.fillStyle = p.color;
+    ctx.font = "700 " + Math.round(16 * S * p.scale) + "px ui-monospace, Menlo, monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(p.text, p.x, p.y - k * 34 * S);
+    ctx.restore();
+  }
+}
+
+function drawCrosshair() {
+  const p = game.crosshair;
+  if (!p || game.state !== STATE.PLAYING) return;
+  const s = 13 * S;
+  ctx.save();
+  ctx.globalAlpha = 0.75;
+  ctx.fillStyle = game.bullets > 0 ? "#ffffff" : "#ff7b6b";
+  ctx.fillRect(p.x - s, p.y - 1.5 * S, s * 0.55, 3 * S);
+  ctx.fillRect(p.x + s * 0.45, p.y - 1.5 * S, s * 0.55, 3 * S);
+  ctx.fillRect(p.x - 1.5 * S, p.y - s, 3 * S, s * 0.55);
+  ctx.fillRect(p.x - 1.5 * S, p.y + s * 0.45, 3 * S, s * 0.55);
+  ctx.restore();
+}
+
+function drawHUD() {
+  const pad = 12 * S;
+  ctx.save();
+  ctx.textBaseline = "top";
+
+  // üst şerit
+  ctx.fillStyle = "rgba(6,10,18,.45)";
+  ctx.fillRect(0, 0, W, 74 * S);
+
+  // skor
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#8fa8c6";
+  ctx.font = "700 " + Math.round(10 * S) + "px ui-monospace, Menlo, monospace";
+  ctx.fillText("SKOR", pad, pad);
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "700 " + Math.round(26 * S) + "px ui-monospace, Menlo, monospace";
+  ctx.fillText(String(game.score), pad, pad + 13 * S);
+
+  // tur (sağ üst — debug butonunun solunda)
+  ctx.textAlign = "right";
+  const rx = W - pad - 44 * S;
+  ctx.fillStyle = "#8fa8c6";
+  ctx.font = "700 " + Math.round(10 * S) + "px ui-monospace, Menlo, monospace";
+  ctx.fillText("TUR", rx, pad);
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "700 " + Math.round(22 * S) + "px ui-monospace, Menlo, monospace";
+  ctx.fillText(String(game.round), rx, pad + 13 * S);
+
+  // mermiler
+  const bw = 9 * S, bh = 22 * S, gap = 6 * S;
+  const total = game.roundBullets || CONFIG.round.bulletsPerRound;
+  const bx = pad, by = 48 * S;
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#8fa8c6";
+  ctx.font = "700 " + Math.round(10 * S) + "px ui-monospace, Menlo, monospace";
+  ctx.fillText("MERMİ", bx, by + 5 * S);
+  const startX = bx + 44 * S;
+  for (let i = 0; i < total; i++) {
+    const x = startX + i * (bw + gap);
+    if (i < game.bullets) {
+      ctx.fillStyle = "#ffd166";
+      ctx.fillRect(x, by, bw, bh);
+      ctx.fillStyle = "#b9822a";
+      ctx.fillRect(x, by, bw, 6 * S);
+    } else {
+      ctx.strokeStyle = "rgba(255,255,255,.28)";
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(x + 0.5, by + 0.5, bw, bh);
+    }
+  }
+
+  // combo
+  if (game.combo > 1) {
+    ctx.textAlign = "right";
+    const cx = W - pad - 44 * S;
+    ctx.fillStyle = "#ffd166";
+    ctx.font = "700 " + Math.round(18 * S) + "px ui-monospace, Menlo, monospace";
+    ctx.fillText("COMBO x" + fmt(game.combo), cx, by + 3 * S);
+  }
+
+  // kalan ördek
+  ctx.textAlign = "center";
+  ctx.fillStyle = "rgba(255,255,255,.55)";
+  ctx.font = "700 " + Math.round(11 * S) + "px ui-monospace, Menlo, monospace";
+  ctx.fillText("ÖRDEK " + Math.min(game.resolved, game.roundDucks) + "/" + game.roundDucks, W / 2, pad + 2 * S);
+
+  ctx.restore();
+}
+
+function drawOverlay() {
+  if (game.state === STATE.PLAYING) return;
+  ctx.save();
+  ctx.fillStyle = "rgba(6,10,18,.72)";
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = "center";
+  const cx = W / 2, cy = H * 0.42;
+
+  if (game.state === STATE.READY) {
+    ctx.fillStyle = "#7fd4ff";
+    ctx.font = "700 " + Math.round(13 * S) + "px ui-monospace, Menlo, monospace";
+    ctx.fillText("ÖRDEK AVI", cx, cy - 62 * S);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "700 " + Math.round(40 * S) + "px ui-monospace, Menlo, monospace";
+    ctx.fillText("TUR " + game.round, cx, cy - 26 * S);
+    ctx.fillStyle = "#b9c9dd";
+    ctx.font = Math.round(13 * S) + "px ui-monospace, Menlo, monospace";
+    ctx.fillText(Math.max(1, Math.round(CONFIG.round.ducksPerRound)) + " ördek  ·  " +
+                 Math.max(1, Math.round(CONFIG.round.bulletsPerRound)) + " mermi", cx, cy + 26 * S);
+    ctx.fillText("hız x" + fmt(speedMul()), cx, cy + 46 * S);
+    ctx.fillStyle = "#ffd166";
+    ctx.font = "700 " + Math.round(15 * S) + "px ui-monospace, Menlo, monospace";
+    ctx.fillText("BAŞLAMAK İÇİN DOKUN", cx, cy + 92 * S);
+  } else {
+    ctx.fillStyle = "#7fd4ff";
+    ctx.font = "700 " + Math.round(13 * S) + "px ui-monospace, Menlo, monospace";
+    ctx.fillText("TUR " + game.round + " BİTTİ", cx, cy - 58 * S);
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "700 " + Math.round(34 * S) + "px ui-monospace, Menlo, monospace";
+    ctx.fillText(game.roundHits + " / " + game.roundDucks, cx, cy - 24 * S);
+    ctx.fillStyle = "#b9c9dd";
+    ctx.font = Math.round(13 * S) + "px ui-monospace, Menlo, monospace";
+    ctx.fillText("isabet  ·  " + game.roundShots + " atış", cx, cy + 22 * S);
+    ctx.fillText("toplam skor: " + game.score, cx, cy + 42 * S);
+    ctx.fillText("en yüksek combo: x" + fmt(game.bestCombo), cx, cy + 62 * S);
+    ctx.fillStyle = "#ffd166";
+    ctx.font = "700 " + Math.round(15 * S) + "px ui-monospace, Menlo, monospace";
+    ctx.fillText("SONRAKİ TUR İÇİN DOKUN", cx, cy + 108 * S);
+  }
+  ctx.restore();
+}
+
+/* ========================== ana döngü ========================== */
+let last = performance.now(), fpsAcc = 0, fpsFrames = 0;
+
+function frame(now) {
+  let dt = (now - last) / 1000;
+  last = now;
+  dt = clamp(dt, 0, 0.05);
+
+  fpsAcc += dt; fpsFrames++;
+  if (fpsAcc >= 0.4) { game.fps = Math.round(fpsFrames / fpsAcc); fpsAcc = 0; fpsFrames = 0; updateDebugStats(); }
+
+  if (game.inputLock > 0) game.inputLock -= dt;
+
+  if (game.state === STATE.ROUNDOVER) {
+    game.breakTimer -= dt;
+    if (game.breakTimer <= 0) nextRound();
+  }
+
+  updateRound(dt);
+  updateDucks(dt);
+
+  drawBackground(dt);
+  for (const d of game.ducks) drawDuck(d);
+  drawShots(dt);
+  drawPopups(dt);
+  drawCrosshair();
+  drawHUD();
+  drawOverlay();
+
+  requestAnimationFrame(frame);
+}
+
+/* ========================== debug paneli ========================== */
+const dbgPanel = document.getElementById("dbgPanel");
+const dbgToggle = document.getElementById("dbgToggle");
+let statsEl = null;
+
+function buildDebugPanel() {
+  dbgPanel.innerHTML = "";
+  const title = document.createElement("h3");
+  title.textContent = "Debug / Ayarlar";
+  dbgPanel.appendChild(title);
+
+  statsEl = document.createElement("div");
+  statsEl.className = "dbg-stats";
+  dbgPanel.appendChild(statsEl);
+
+  for (const item of SLIDERS) {
+    if (item.group) {
+      const g = document.createElement("div");
+      g.className = "dbg-group";
+      g.textContent = item.group;
+      dbgPanel.appendChild(g);
+      continue;
+    }
+    const row = document.createElement("div");
+    row.className = "dbg-row";
+
+    const label = document.createElement("label");
+    const name = document.createElement("span");
+    name.textContent = item.label;
+    const val = document.createElement("b");
+    const input = document.createElement("input");
+
+    input.type = "range";
+    input.min = item.min; input.max = item.max; input.step = item.step;
+    input.value = getPath(CONFIG, item.path);
+    val.textContent = input.value;
+
+    input.addEventListener("input", () => {
+      const v = parseFloat(input.value);
+      setPath(CONFIG, item.path, v);
+      val.textContent = input.value;
+    });
+
+    label.appendChild(name); label.appendChild(val);
+    row.appendChild(label); row.appendChild(input);
+    dbgPanel.appendChild(row);
+    item._input = input; item._val = val;
+  }
+
+  const btns = document.createElement("div");
+  btns.className = "dbg-btns";
+
+  const bRestart = document.createElement("button");
+  bRestart.textContent = "Turu yenile";
+  bRestart.addEventListener("click", () => { startRound(); });
+
+  const bReset = document.createElement("button");
+  bReset.textContent = "Varsayılan";
+  bReset.addEventListener("click", () => {
+    const d = JSON.parse(JSON.stringify(DEFAULTS));
+    for (const k of Object.keys(d)) Object.assign(CONFIG[k], d[k]);
+    syncSliders();
+  });
+
+  const bNew = document.createElement("button");
+  bNew.textContent = "Yeni oyun";
+  bNew.addEventListener("click", () => { resetGame(); });
+
+  btns.appendChild(bRestart); btns.appendChild(bReset); btns.appendChild(bNew);
+  dbgPanel.appendChild(btns);
+}
+
+function syncSliders() {
+  for (const item of SLIDERS) {
+    if (!item._input) continue;
+    item._input.value = getPath(CONFIG, item.path);
+    item._val.textContent = item._input.value;
+  }
+}
+
+function updateDebugStats() {
+  if (!statsEl || dbgPanel.hidden) return;
+  statsEl.innerHTML =
+    "fps <span>" + game.fps + "</span> · ördek <span>" + game.ducks.length + "</span><br>" +
+    "hız çarpanı <span>x" + fmt(speedMul()) + "</span> (" + Math.round(CONFIG.duck.speed * speedMul()) + " px/sn)<br>" +
+    "spawn <span>" + Math.round(Math.max(CONFIG.spawn.minInterval, CONFIG.spawn.interval * spawnMul())) + " ms</span> · durum <span>" + game.state + "</span>";
+}
+
+dbgToggle.addEventListener("click", () => {
+  dbgPanel.hidden = !dbgPanel.hidden;
+  dbgToggle.textContent = dbgPanel.hidden ? "⚙" : "✕";
+  if (!dbgPanel.hidden) { syncSliders(); updateDebugStats(); }
+});
+
+/* ========================== başlat ========================== */
+buildDebugPanel();
+resize();
+makeClouds();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

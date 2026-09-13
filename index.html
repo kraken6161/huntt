@@ -118,8 +118,9 @@ const CONFIG = {
     maxAlive:       4      // ekranda aynı anda en fazla kaç ördek
   },
   ammo: {
-    poolSize:       12,    // tur boyunca ortak mermi havuzu
-    refundOnHit:    1,     // isabette geri gelen mermi (atış maliyeti hep 1)
+    poolSize:       15,    // tur boyunca ortak mermi havuzu
+    refundOnHit:    1,     // isabette geri gelen mermi (atış maliyeti hep 1 → net 0)
+    missCost:       2,     // ıskanın toplam mermi maliyeti
     lowWarning:     3,     // bu değerin altında görsel uyarı
     refillEachRound: 1     // 1: her tur havuz dolar, 0: havuz run boyunca taşınır
   },
@@ -150,6 +151,7 @@ const SLIDERS = [
   { group: "Mermi ekonomisi" },
   { path: "ammo.poolSize",           label: "Havuz boyutu",        min: 1,   max: 40,   step: 1 },
   { path: "ammo.refundOnHit",        label: "İsabette geri gelen", min: 0,   max: 3,    step: 1 },
+  { path: "ammo.missCost",           label: "Iska maliyeti",       min: 1,   max: 5,    step: 1 },
   { path: "ammo.lowWarning",         label: "Uyarı eşiği",         min: 0,   max: 10,   step: 1 },
   { path: "ammo.refillEachRound",    label: "Her tur dolsun (0/1)",min: 0,   max: 1,    step: 1 },
   { group: "Tur" },
@@ -266,8 +268,10 @@ const duckH    = () => CONFIG.duck.height * sizeMul();
 /* Turu geçmek için gereken teorik isabet oranı: hedef / (hedef + harcanabilir ıska) */
 const neededAcc = () => {
   const net = 1 - CONFIG.ammo.refundOnHit;               // isabet başına net mermi maliyeti
-  const spare = CONFIG.ammo.poolSize - 1 - game.goal * net;
-  return spare <= 0 ? 1 : game.goal / (game.goal + spare);
+  const cost = Math.max(1, Math.round(CONFIG.ammo.missCost));
+  const budget = CONFIG.ammo.poolSize - 1 - game.goal * net;
+  const maxMiss = Math.floor(budget / cost);
+  return maxMiss <= 0 ? 1 : game.goal / (game.goal + maxMiss);
 };
 
 const spawnDelay = () => {
@@ -395,9 +399,10 @@ function shoot(x, y) {
     game.bestCombo = Math.max(game.bestCombo, game.combo);
     game.shots.push({ x, y, age: 0, hit: true });
   } else {
+    game.ammo -= Math.max(0, Math.round(CONFIG.ammo.missCost) - 1);   // atış zaten 1 götürdü
     setCombo(1, "down");
     game.shots.push({ x, y, age: 0, hit: false });
-    addPopup(x, y - 14, "ISKA  -1", "#ff7b6b", 0.85);
+    addPopup(x, y - 14, "ISKA  -" + Math.round(CONFIG.ammo.missCost), "#ff7b6b", 0.85);
     game.ammoPulse = 1;
   }
 
@@ -798,7 +803,7 @@ function drawOverlay() {
     L("DUCK PROTO", -96, 13, "#7fd4ff", "700");
     L("ÖRDEK AVI", -66, 34, "#ffffff", "700");
     L(CONFIG.ammo.poolSize + " mermilik ortak havuz", -18, 13, "#b9c9dd");
-    L("isabet mermi kazandırır, ıska kaybettirir", 2, 13, "#b9c9dd");
+    L("isabet net 0, ıska −" + Math.round(CONFIG.ammo.missCost) + " mermi", 2, 13, "#b9c9dd");
     L("tur hedefi: " + goalFor(1) + " ördek (+" + CONFIG.round.goalGrowth + "/tur)", 22, 13, "#b9c9dd");
     L("kombo " + CONFIG.combo.decayTime + " sn ateş edilmezse düşer", 42, 13, "#b9c9dd");
     L("BAŞLAMAK İÇİN DOKUN", 92, 15, "#ffd166", "700");

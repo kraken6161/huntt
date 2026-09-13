@@ -1,5 +1,5 @@
 Duck Proto — Tasarım Notu
-Ne: Duck Hunt tarzı gallery shooter + roguelike. Tek run, kalıcı ilerleme yok. Hedef run süresi 15–20 dk.
+Ne: Duck Hunt tarzı gallery shooter + roguelike. Tek run, kalıcı ilerleme yok. Hedef run süresi 5–8 dk.
 Çekirdek gerilim: İki güç birbirine ters çeker. Mermi kıttır ve isabete bağlıdır → acele etme, emin ol. Kombo çarpanı zamanla düşer → bekleme, hızlı vur. Oyun bu ikisi arasındaki karardan doğar.
 Tasarım ilkeleri:
 	•	Yükseltmeler nişan almayı kolaylaştırmaz, mermiyi nasıl harcadığını değiştirir. Ekstra hasar değil, "iki ördek hizalanınca delip geçer" gibi karar üretenler.

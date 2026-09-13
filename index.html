@@ -170,6 +170,8 @@ const CONFIG = {
     refundOnHit:    1,     // isabette geri gelen mermi (atış maliyeti hep 1 → net 0)
     missCost:       2,     // ıskanın toplam mermi maliyeti
     escapeCost:     1,     // kaçan ördeğin mermi maliyeti
+    missReloadDelay: 0.45, // ıskadan sonra ateş edilemeyen süre (sn) — tek etki zaman
+    poolGrowthPerRound: 2, // her turda havuza eklenen mermi
     lowWarning:     3,     // bu değerin altında görsel uyarı
     refillEachRound: 1     // 1: her tur havuz dolar, 0: havuz run boyunca taşınır
   },
@@ -197,14 +199,14 @@ const CONFIG = {
      sim.js de bu değerleri okur; p = skill × ölçek^sizeExp ×
      (temel hız/hız)^speedExp × (1 − centerPenalty × merkeze uzaklık) */
   model: {
-    skill:          0.75,
+    skill:          1.03,   // gerçek telemetriden kalibre edildi (isabet/Σq = 1.028)
     sizeExp:        0.80,
     speedExp:       0.60,
     centerPenalty:  0.35
   }
 };
 
-const GAME_VERSION = "0.3.0";   // telemetri dosyalarına yazılır, elle artır
+const GAME_VERSION = "0.4.0";   // telemetri dosyalarına yazılır, elle artır
 
 /* Debug panelindeki slider'lar */
 const SLIDERS = [
@@ -213,6 +215,8 @@ const SLIDERS = [
   { path: "ammo.refundOnHit",        label: "İsabette geri gelen", min: 0,   max: 3,    step: 1 },
   { path: "ammo.missCost",           label: "Iska maliyeti",       min: 1,   max: 5,    step: 1 },
   { path: "ammo.escapeCost",         label: "Kaçış maliyeti",      min: 0,   max: 5,    step: 1 },
+  { path: "ammo.missReloadDelay",    label: "Iska dolum gecik. (sn)", min: 0, max: 2,    step: 0.05 },
+  { path: "ammo.poolGrowthPerRound", label: "Tur başına havuz +",  min: 0,   max: 10,   step: 1 },
   { path: "ammo.lowWarning",         label: "Uyarı eşiği",         min: 0,   max: 10,   step: 1 },
   { path: "ammo.refillEachRound",    label: "Her tur dolsun (0/1)",min: 0,   max: 1,    step: 1 },
   { group: "Tur" },
@@ -305,6 +309,9 @@ const game = {
   comboFlash: "up",    // "up" | "down"
   ammoPulse: 0,
   escapeFlash: 0,
+  reload: 0,            // ıska sonrası ateş edilemeyen kalan süre (sn)
+  reloadTotal: 0,
+  blockedTaps: 0,
   runShots: 0,
   runHits: 0,
   roundShots: 0,
@@ -386,13 +393,18 @@ const telemetry = {
     this.endRoundRecord(false);
     const t = this.now();
     this.run._round = {
-      round, goal, t0: t, dur: 0, score: 0, shots: 0, hits: 0, escaped: 0, cleared: false,
+      round, goal, t0: t, dur: 0, score: 0, shots: 0, hits: 0, escaped: 0, blockedTaps: 0, cleared: false,
+      pool: poolFor(round),
       ammoCurve: [[t, ammo]], comboCurve: [[t, 1]]
     };
   },
   ammoAt(ammo) { const r = this.run && this.run._round; if (r) r.ammoCurve.push([this.now(), ammo]); },
   comboAt(c)   { const r = this.run && this.run._round; if (r) r.comboCurve.push([this.now(), +c.toFixed(2)]); },
   addScore(v)  { const r = this.run && this.run._round; if (r) r.score += v; },
+  blockedTap() {
+    const r = this.run && this.run._round;
+    if (r) r.blockedTaps = (r.blockedTaps || 0) + 1;
+  },
   duckEvent(ev, d) {
     if (!this.run || game.state !== STATE.PLAYING) return;
     this.run.duckEvents.push({
@@ -428,6 +440,7 @@ const telemetry = {
     r.shotCount = r.shots.length;
     r.hitCount = r.shots.filter(x => x.hit).length;
     r.escapedCount = r.duckEvents.filter(x => x.ev === "escape").length;
+    r.blockedTaps = r.rounds.reduce((a, x) => a + (x.blockedTaps || 0), 0);
     delete r._round; delete r._t0;
     const store = this.load();
     store.runs.push(r);
@@ -442,13 +455,14 @@ const speedMul = () => Math.pow(1 + CONFIG.difficulty.speedGrowth, game.round - 
 const spawnMul = () => Math.max(0.12, Math.pow(1 - CONFIG.difficulty.spawnGrowth, game.round - 1));
 const sizeMul  = () => Math.max(CONFIG.duck.minScale, Math.pow(1 - CONFIG.difficulty.sizeShrink, game.round - 1));
 const goalFor  = r => Math.round(CONFIG.round.goal + CONFIG.round.goalGrowth * (r - 1));
+const poolFor  = r => Math.max(1, Math.round(CONFIG.ammo.poolSize + CONFIG.ammo.poolGrowthPerRound * (r - 1)));
 const duckW    = () => CONFIG.duck.width * sizeMul();
 const duckH    = () => CONFIG.duck.height * sizeMul();
 /* Turu geçmek için gereken teorik isabet oranı: hedef / (hedef + harcanabilir ıska) */
 const neededAcc = () => {
   const net = 1 - CONFIG.ammo.refundOnHit;               // isabet başına net mermi maliyeti
   const cost = Math.max(1, Math.round(CONFIG.ammo.missCost));
-  const budget = CONFIG.ammo.poolSize - 1 - game.goal * net;
+  const budget = poolFor(game.round) - 1 - game.goal * net;
   const maxMiss = Math.floor(budget / cost);
   return maxMiss <= 0 ? 1 : game.goal / (game.goal + maxMiss);
 };
@@ -554,7 +568,7 @@ function updateDucks(dt) {
       if (game.state === STATE.PLAYING) {
         game.escaped++;
         telemetry.duckEvent("escape", d);
-        const ex = clamp(d.x, 62 * S, W - 62 * S), ey = clamp(d.y, 176 * S, H - 60);
+        const ex = clamp(d.x, 40, W - 40), ey = clamp(d.y, 176 * S, H - 60);
         const escCost = Math.max(0, Math.round(CONFIG.ammo.escapeCost));
         if (escCost > 0 && game.endTimer < 0) {
           game.ammo -= escCost;
@@ -637,6 +651,7 @@ function shoot(x, y) {
     game.shots.push({ x, y, age: 0, hit: true });
   } else {
     game.ammo -= Math.max(0, Math.round(CONFIG.ammo.missCost) - 1);   // atış zaten 1 götürdü
+    game.reload = game.reloadTotal = Math.max(0, CONFIG.ammo.missReloadDelay);
     setCombo(1, "down");
     game.shots.push({ x, y, age: 0, hit: false });
     addPopup(x, y - 14, "ISKA  -" + Math.round(CONFIG.ammo.missCost), "#ff7b6b", 0.85);
@@ -647,7 +662,7 @@ function shoot(x, y) {
   telemetry.shot({
     t: telemetry.now(), round: game.round, hit: !!hit,
     x: Math.round(x), y: Math.round(y),
-    p: tp, q: tq, target: tRec,
+    p: tp, q: tq, target: tRec, reloadLeft: +game.reload.toFixed(2),
     combo: +comboBefore.toFixed(2), ammo: game.ammo
   });
 
@@ -665,7 +680,8 @@ function setCombo(value, dir) {
 }
 
 function addPopup(x, y, text, color, scale) {
-  game.popups.push({ x, y, text, color, scale: scale || 1, life: 0, ttl: 0.9 });
+  // yazı ekran kenarında kırpılmasın
+  game.popups.push({ x: clamp(x, 62 * S, W - 62 * S), y, text, color, scale: scale || 1, life: 0, ttl: 0.9 });
 }
 
 /* ========================== tur / run akışı ========================== */
@@ -675,7 +691,7 @@ function startRun() {
   game.bestCombo = 1;
   game.runShots = 0; game.runHits = 0; game.escaped = 0;
   game.runTime = 0;
-  game.ammo = Math.max(1, Math.round(CONFIG.ammo.poolSize));
+  game.ammo = poolFor(1);
   telemetry.startRun();
   startRound();
 }
@@ -687,9 +703,10 @@ function startRound() {
   game.roundShots = 0; game.roundHits = 0;
   game.combo = 1;                      // her tur başında 1x'e döner
   game.comboPulse = 0;
+  game.reload = 0; game.reloadTotal = 0; game.blockedTaps = 0;
   game.sinceShot = 0;
   if (CONFIG.ammo.refillEachRound >= 0.5 || game.round === 1) {
-    game.ammo = Math.max(1, Math.round(CONFIG.ammo.poolSize));
+    game.ammo = poolFor(game.round);
   }
   game.ducks.length = 0;
   game.spawnTimer = CONFIG.spawn.firstDelay / 1000;
@@ -723,6 +740,7 @@ function updateRound(dt) {
   game.runTime += dt;
 
   // kombo zamanla düşer: son atıştan beri decayTime geçtiyse bir kademe in
+  if (game.reload > 0) game.reload = Math.max(0, game.reload - dt);
   game.sinceShot += dt;
   if (game.combo > 1 && game.sinceShot >= CONFIG.combo.decayTime) {
     setCombo(Math.max(1, game.combo - CONFIG.combo.step), "down");
@@ -770,7 +788,14 @@ function handlePress(x, y) {
   if (game.state === STATE.READY)     { startRun(); return; }
   if (game.state === STATE.ROUNDOVER) { nextRound(); return; }
   if (game.state === STATE.GAMEOVER)  { startRun(); return; }
-  if (game.state === STATE.PLAYING && game.endTimer < 0 && game.ammo > 0) shoot(x, y);
+  if (game.state !== STATE.PLAYING || game.endTimer >= 0 || game.ammo <= 0) return;
+  if (game.reload > 0) {                       // dolum sürüyor: atış yok, ceza da yok
+    game.blockedTaps++;
+    game.shots.push({ x, y, age: 0, hit: false, blocked: true });
+    telemetry.blockedTap();
+    return;
+  }
+  shoot(x, y);
 }
 
 if (window.PointerEvent) {
@@ -877,10 +902,10 @@ function drawShots(dt) {
     s.age += dt;
     const t = s.age / 0.35;
     if (t >= 1) { game.shots.splice(i, 1); continue; }
-    const size = (14 + t * (s.escape ? 52 : 34)) * S;
+    const size = (14 + t * (s.escape ? 52 : s.blocked ? 18 : 34)) * S;
     ctx.save();
-    ctx.globalAlpha = 1 - t;
-    ctx.strokeStyle = s.escape ? "#ff9f43" : (s.hit ? "#ffd166" : "#ff7b6b");
+    ctx.globalAlpha = (1 - t) * (s.blocked ? 0.55 : 1);
+    ctx.strokeStyle = s.escape ? "#ff9f43" : s.blocked ? "#8fa3bd" : (s.hit ? "#ffd166" : "#ff7b6b");
     ctx.lineWidth = (s.escape ? 4 : 3) * S;
     ctx.strokeRect(s.x - size / 2, s.y - size / 2, size, size);
     if (s.escape) {
@@ -912,8 +937,8 @@ function drawCrosshair() {
   if (!p || game.state !== STATE.PLAYING) return;
   const s = 13 * S;
   ctx.save();
-  ctx.globalAlpha = 0.75;
-  ctx.fillStyle = game.ammo > 0 ? "#ffffff" : "#ff7b6b";
+  ctx.globalAlpha = game.reload > 0 ? 0.45 : 0.75;
+  ctx.fillStyle = game.reload > 0 ? "#8fa3bd" : (game.ammo > 0 ? "#ffffff" : "#ff7b6b");
   ctx.fillRect(p.x - s, p.y - 1.5 * S, s * 0.55, 3 * S);
   ctx.fillRect(p.x + s * 0.45, p.y - 1.5 * S, s * 0.55, 3 * S);
   ctx.fillRect(p.x - 1.5 * S, p.y - s, 3 * S, s * 0.55);
@@ -981,7 +1006,7 @@ function drawHUD(dt) {
   ctx.globalAlpha = 1;
 
   // mermi pipleri
-  const poolMax = Math.max(1, Math.round(CONFIG.ammo.poolSize));
+  const poolMax = poolFor(game.round);
   if (poolMax <= 20) {
     const pipW = Math.min(7 * S, (W * 0.42) / poolMax - 2 * S);
     const pipH = 15 * S, gap = 2.5 * S;
@@ -999,6 +1024,20 @@ function drawHUD(dt) {
         ctx.strokeRect(x + 0.5, py0 + 0.5, pipW, pipH);
       }
     }
+  }
+
+  // ---- ıska sonrası yeniden doldurma ----
+  if (game.reload > 0 && game.reloadTotal > 0) {
+    const k = game.reload / game.reloadTotal;
+    const rw = 96 * S, rh = 6 * S, rx0 = pad, ry0 = ay + 34 * S;
+    ctx.fillStyle = "rgba(255,255,255,.15)";
+    ctx.fillRect(rx0, ry0, rw, rh);
+    ctx.fillStyle = "#7fd4ff";
+    ctx.fillRect(rx0, ry0, rw * (1 - k), rh);
+    ctx.fillStyle = "#7fd4ff";
+    ctx.font = "700 " + Math.round(9 * S) + "px ui-monospace, Menlo, monospace";
+    ctx.textAlign = "left";
+    ctx.fillText("DOLDURULUYOR", rx0 + rw + 6 * S, ry0 - 1 * S);
   }
 
   // ---- kombo ----
@@ -1068,12 +1107,14 @@ function drawOverlay() {
   if (game.state === STATE.READY) {
     L("DUCK PROTO", -96, 13, "#7fd4ff", "700");
     L("ÖRDEK AVI", -66, 34, "#ffffff", "700");
-    L(CONFIG.ammo.poolSize + " mermilik ortak havuz", -18, 13, "#b9c9dd");
+    L(poolFor(1) + " mermilik ortak havuz", -18, 13, "#b9c9dd");
     L("isabet net 0  ·  ıska −" + Math.round(CONFIG.ammo.missCost) +
       "  ·  kaçan ördek −" + Math.round(CONFIG.ammo.escapeCost), 2, 13, "#b9c9dd");
-    L("tur hedefi: " + goalFor(1) + " ördek (+" + CONFIG.round.goalGrowth + "/tur)", 22, 13, "#b9c9dd");
-    L("kombo " + CONFIG.combo.decayTime + " sn ateş edilmezse düşer", 42, 13, "#b9c9dd");
-    L("BAŞLAMAK İÇİN DOKUN", 92, 15, "#ffd166", "700");
+    L("tur hedefi: " + goalFor(1) + " ördek (+" + CONFIG.round.goalGrowth + "/tur, havuz +" +
+      Math.round(CONFIG.ammo.poolGrowthPerRound) + ")", 22, 13, "#b9c9dd");
+    L("ıskadan sonra " + CONFIG.ammo.missReloadDelay.toFixed(2) + " sn yeniden doldurma", 42, 13, "#b9c9dd");
+    L("kombo " + CONFIG.combo.decayTime + " sn ateş edilmezse düşer", 62, 13, "#b9c9dd");
+    L("BAŞLAMAK İÇİN DOKUN", 104, 15, "#ffd166", "700");
   } else if (game.state === STATE.ROUNDOVER) {
     L("TUR " + game.round + " TAMAM", -92, 13, "#7bd88f", "700");
     L("+" + game.roundScore, -58, 34, "#ffffff", "700");

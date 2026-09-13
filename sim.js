@@ -28,7 +28,11 @@ const SIM = {
   screenH: 800,
   hudHeight: 156,         // üstteki HUD şeridi — arkasındaki ördek vurulamaz
   dt: 1 / 20,             // simülasyon adımı (sn)
-  shotInterval: 0.45,     // iki atış arası nişan süresi (sn)
+  /* Atış temposu gerçek telemetriden ölçüldü (86 atış, iPhone):
+     isabetten sonra medyan 0.92 sn, ıskadan sonra 0.55 sn, log-normal σ≈0.45 */
+  shotIntervalHit:  0.92,
+  shotIntervalMiss: 0.55,
+  shotIntervalSigma: 0.45,
   acquireDelay: 0.20,     // ördek göründükten sonra atışa uygun hale gelme (sn)
   stallSeconds: 45,       // bu kadar süre hiç atış olmazsa run tıkandı sayılır
   maxRounds: 60,
@@ -43,10 +47,12 @@ const SIM = {
     maxP:          0.98
   },
   skills: [               // beceri = merkezdeki, temel boy ve hızdaki ördeğin tavan olasılığı
-    { name: "düşük",  skill: 0.55 },
-    { name: "orta",   skill: 0.75 },
-    { name: "yüksek", skill: 0.92 }
+    { name: "düşük",   skill: 0.55 },
+    { name: "orta",    skill: 0.75 },
+    { name: "yüksek",  skill: 0.92 },
+    { name: "kalibre", skill: 1.03 }   // gerçek telemetriden: isabet/Σq = 1.028
   ],
+  skillFilter: null,      // --skills=kalibre
   sweep: { from: 0, to: 0.9, step: 0.05 }
 };
 
@@ -59,6 +65,7 @@ const RUNS = parseInt(args.runs || "1000", 10);
 const SWEEP_RUNS = parseInt(args.sweepRuns || "300", 10);
 const ACCS = (args.acc || "0.5,0.65,0.8").split(",").map(Number);
 const SEED0 = parseInt(args.seed || "1", 10);
+if (args.skills) SIM.skills = SIM.skills.filter(s => args.skills.split(",").includes(s.name));
 const VERBOSE = args.verbose === "true";
 
 /* ---- CONFIG'i index.html'den çek (tek kaynak) ---- */
@@ -78,12 +85,26 @@ function loadConfig(file) {
 const CONFIG_FILE = path.resolve(__dirname, args.config || "index.html");
 const CONFIG = loadConfig(CONFIG_FILE);
 /* kalite modeli oyunla aynı olsun: index.html'deki CONFIG.model kazanır */
+applySet(CONFIG, args.set);
 if (CONFIG.model) {
   for (const k of ["sizeExp", "speedExp", "centerPenalty"]) {
     if (typeof CONFIG.model[k] === "number") SIM.quality[k] = CONFIG.model[k];
   }
 }
 const EMIT = args.emit || "";
+const VARIANTS = args.variants === "true";
+/* --set=ammo.missReloadDelay=0,ammo.poolGrowthPerRound=0 */
+function applySet(cfg, spec) {
+  if (!spec) return;
+  for (const kv of spec.split(",")) {
+    const [path, val] = kv.split("=");
+    if (!path || val === undefined) continue;
+    const keys = path.trim().split("."), last = keys.pop();
+    let o = cfg;
+    for (const k of keys) { if (!o[k]) o[k] = {}; o = o[k]; }
+    o[last] = parseFloat(val);
+  }
+}
 
 /* ---- yardımcılar ---- */
 function mulberry32(a) {
@@ -110,6 +131,9 @@ const speedMul = r => Math.pow(1 + CONFIG.difficulty.speedGrowth, r - 1);
 const spawnMul = r => Math.max(0.12, Math.pow(1 - CONFIG.difficulty.spawnGrowth, r - 1));
 const sizeMul  = r => Math.max(CONFIG.duck.minScale, Math.pow(1 - CONFIG.difficulty.sizeShrink, r - 1));
 const goalFor  = r => Math.round(CONFIG.round.goal + CONFIG.round.goalGrowth * (r - 1));
+const poolFor  = r => Math.max(1, Math.round(CONFIG.ammo.poolSize +
+                       (CONFIG.ammo.poolGrowthPerRound || 0) * (r - 1)));
+const reloadDelay = () => Math.max(0, CONFIG.ammo.missReloadDelay || 0);
 const missCost = () => Math.max(1, Math.round(CONFIG.ammo.missCost === undefined ? 1 : CONFIG.ammo.missCost));
 const escapeCost = () => Math.max(0, Math.round(CONFIG.ammo.escapeCost === undefined ? 0 : CONFIG.ammo.escapeCost));
 
@@ -117,13 +141,13 @@ const escapeCost = () => Math.max(0, Math.round(CONFIG.ammo.escapeCost === undef
 function neededAcc(r) {
   const net = 1 - CONFIG.ammo.refundOnHit;
   const goal = goalFor(r);
-  const budget = CONFIG.ammo.poolSize - 1 - goal * net;
+  const budget = poolFor(r) - 1 - goal * net;
   const maxMiss = Math.floor(budget / missCost());
   return maxMiss <= 0 ? 1 : goal / (goal + maxMiss);
 }
 const maxMissesFor = r => {
   const net = 1 - CONFIG.ammo.refundOnHit;
-  return Math.max(0, Math.floor((CONFIG.ammo.poolSize - 1 - goalFor(r) * net) / missCost()));
+  return Math.max(0, Math.floor((poolFor(r) - 1 - goalFor(r) * net) / missCost()));
 };
 
 /* ========================== ördek (oyunla aynı yol) ========================== */
@@ -197,8 +221,17 @@ function simulateRun(opts, seed) {
   const cost = missCost();
   const escCost = escapeCost();
 
+  const gauss = () => {                       // Box-Muller
+    let u = 0, v = 0;
+    while (!u) u = rnd(); while (!v) v = rnd();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
+  const sampleGap = base => Math.min(6, Math.max(0.15, base * Math.exp(gauss() * SIM.shotIntervalSigma)));
+  const rd = reloadDelay();
+
   let t = 0, round = 1, runScore = 0;
-  let ammo = Math.max(1, Math.round(CONFIG.ammo.poolSize));
+  let ammo = poolFor(1);
+  let drainMiss = 0, drainEscape = 0, postMiss = 0, reloadBite = 0;
   let shots = 0, hits = 0, escaped = 0, escapedUnshot = 0;
   let deathBy = "";
   let peakCombo = 1, comboSum = 0, pSum = 0, holdTime = 0, playTime = 0;
@@ -207,7 +240,7 @@ function simulateRun(opts, seed) {
 
   while (alive && round <= SIM.maxRounds && t < SIM.maxRunSeconds) {
     const goal = goalFor(round);
-    if (CONFIG.ammo.refillEachRound >= 0.5) ammo = Math.max(1, Math.round(CONFIG.ammo.poolSize));
+    if (CONFIG.ammo.refillEachRound >= 0.5) ammo = poolFor(round);
     if (ammo <= 0) { alive = false; break; }
 
     let combo = 1, sinceShot = 0, roundHits = 0, roundShots = 0, roundScore = 0;
@@ -238,6 +271,7 @@ function simulateRun(opts, seed) {
           if (!ducks[i].shotAt) escapedUnshot++;
           ducks.splice(i, 1);
           ammo -= escCost;                       // kaçan ördek mermi götürür
+          drainEscape += escCost;
           if (ammo <= 0) { roundOver = true; alive = false; deathBy = "kaçış"; }
         }
       }
@@ -265,11 +299,11 @@ function simulateRun(opts, seed) {
         }
 
         if (target >= 0) {
-          cooldown = SIM.shotInterval;
           sinceShot = 0; sinceAnyShot = 0;
           ducks[target].shotAt = true;
           ammo -= 1; shots++; roundShots++; pSum += targetP;
           if (rnd() < targetP) {
+            cooldown = sampleGap(SIM.shotIntervalHit);
             ammo += CONFIG.ammo.refundOnHit;
             hits++; roundHits++;
             const gain = Math.round(CONFIG.score.perDuck * combo);
@@ -279,7 +313,12 @@ function simulateRun(opts, seed) {
             if (combo > peakCombo) peakCombo = combo;
             ducks.splice(target, 1);
           } else {
+            const gap = sampleGap(SIM.shotIntervalMiss);
+            postMiss++;
+            if (rd > gap) reloadBite++;
+            cooldown = Math.max(gap, rd);        // ıska sonrası yeniden doldurma
             ammo -= (cost - 1);
+            drainMiss += cost;
             combo = 1;
           }
           if (roundHits >= goal) { roundOver = true; cleared = true; }
@@ -301,7 +340,8 @@ function simulateRun(opts, seed) {
     duration: t, roundReached: round, roundsCleared: rounds.filter(r => r.cleared).length,
     score: runScore, shots, hits, misses: shots - hits, escaped, escapedUnshot,
     peakCombo, avgCombo: hits ? comboSum / hits : 1, avgShotP: shots ? pSum / shots : 0,
-    holdShare: playTime ? holdTime / playTime : 0, stalled, deathBy, rounds, ammoSeries
+    holdShare: playTime ? holdTime / playTime : 0, stalled, deathBy, rounds, ammoSeries,
+    drainMiss, drainEscape, reloadBite: postMiss ? reloadBite / postMiss : 0
   };
 }
 
@@ -324,7 +364,10 @@ function batch(opts, n, seedBase) {
     stall: runs.filter(r => r.stalled).length / runs.length,
     deathEscape: runs.filter(r => r.deathBy === "kaçış").length / runs.length,
     deathShot: runs.filter(r => r.deathBy === "atış").length / runs.length,
-    escaped: mean(runs.map(r => r.escaped))
+    escaped: mean(runs.map(r => r.escaped)),
+    drainMiss: mean(runs.map(r => r.drainMiss)),
+    drainEscape: mean(runs.map(r => r.drainEscape)),
+    reloadBite: mean(runs.map(r => r.reloadBite))
   };
 }
 
@@ -339,7 +382,10 @@ function header() {
   console.log("config: " + path.basename(CONFIG_FILE) +
     "  ·  havuz " + C.ammo.poolSize + "  ·  isabet −1/+" + C.ammo.refundOnHit +
     " (net " + (1 - C.ammo.refundOnHit === 0 ? "0" : -(1 - C.ammo.refundOnHit)) + ")" +
-    "  ·  ıska −" + missCost() + "  ·  kaçan ördek −" + escapeCost());
+    "  ·  ıska −" + missCost() + "  ·  kaçan ördek −" + escapeCost() +
+    "\nhavuz büyümesi +" + (CONFIG.ammo.poolGrowthPerRound || 0) + "/tur  ·  ıska dolum gecikmesi " +
+    reloadDelay().toFixed(2) + " sn  ·  oyuncu temposu " + SIM.shotIntervalHit + "/" +
+    SIM.shotIntervalMiss + " sn (isabet/ıska, ölçülmüş)");
   console.log("hedef " + C.round.goal + " (+" + C.round.goalGrowth + "/tur)  ·  kombo +" + C.combo.step +
     " / max x" + C.combo.max + " / " + C.combo.decayTime + "sn'de bir kademe düşer  ·  ördek puanı " + C.score.perDuck);
   console.log("zorluk/tur: hız +" + Math.round(C.difficulty.speedGrowth * 100) + "%  spawn −" +
@@ -349,8 +395,8 @@ function header() {
   console.log("\nTuru geçmek için gereken isabet oranı (ve harcanabilir ıska sayısı)");
   let l1 = "", l2 = "";
   for (let r = 1; r <= 10; r++) {
-    l1 += padr("T" + r, 7);
-    l2 += padr(Math.round(neededAcc(r) * 100) + "% /" + maxMissesFor(r), 7);
+    l1 += padr("T" + r, 8);
+    l2 += padr(Math.round(neededAcc(r) * 100) + "% /" + maxMissesFor(r), 8);
   }
   console.log("  " + l1 + "\n  " + l2);
 }
@@ -520,11 +566,63 @@ function verdict(results, fixedOut) {
   console.log("\n" + "═".repeat(78) + "\n");
 }
 
+/* ============ varyant karşılaştırması: sadece a / sadece b / a+b ============ */
+function variantsSection() {
+  const baseMRD = CONFIG.ammo.missReloadDelay || 0;
+  const basePG = CONFIG.ammo.poolGrowthPerRound || 0;
+  const variants = [
+    { name: "temel (ikisi de yok)", mrd: 0,       pg: 0 },
+    { name: "a: dolum " + baseMRD + " sn",  mrd: baseMRD, pg: 0 },
+    { name: "b: havuz +" + basePG + "/tur", mrd: 0,       pg: basePG },
+    { name: "a + b birlikte",       mrd: baseMRD, pg: basePG }
+  ];
+
+  console.log("\n" + "═".repeat(104));
+  console.log("BÖLÜM D — YAPISAL DEĞİŞİKLİKLERİN AYRI AYRI ETKİSİ   (" + SWEEP_RUNS + " run/eşik, eşik taraması her varyant için ayrı)");
+  console.log("═".repeat(104));
+
+  for (const sk of SIM.skills) {
+    console.log("\n  beceri: " + sk.name + " (" + sk.skill + ")");
+    console.log("  " + "─".repeat(102));
+    console.log("  varyant                 opt.eşik   süre     tur   skor(opt)   skor(eşik0)  ıska%  bekle%  mermi ıska/kaçış  dolum ısırma");
+    for (const v of variants) {
+      CONFIG.ammo.missReloadDelay = v.mrd;
+      CONFIG.ammo.poolGrowthPerRound = v.pg;
+      const rows = [];
+      for (let th = SIM.sweep.from; th <= SIM.sweep.to + 1e-9; th += SIM.sweep.step) {
+        const thr = Math.round(th * 100) / 100;
+        rows.push({ thr, b: batch({ mode: "quality", skill: sk.skill, threshold: thr }, SWEEP_RUNS,
+                                  SEED0 * 7 + Math.round(sk.skill * 1000) * 131) });
+      }
+      const best = rows.reduce((a, r) => r.b.score > a.b.score ? r : a, rows[0]);
+      const zero = rows[0].b;
+      const dm = best.b.drainMiss, de = best.b.drainEscape, dt2 = dm + de || 1;
+      console.log("  " + padr(v.name, 24) +
+        padr(best.thr.toFixed(2), 11) +
+        padr(mmss(best.b.dur), 9) +
+        padr(best.b.rounds.toFixed(1), 6) +
+        padr(Math.round(best.b.score) + " ±" + Math.round(best.b.scoreSE), 12) +
+        padr(Math.round(zero.score) + " ±" + Math.round(zero.scoreSE), 13) +
+        padr("%" + Math.round((1 - best.b.acc) * 100), 7) +
+        padr("%" + Math.round(best.b.hold * 100), 8) +
+        padr("%" + Math.round(100 * dm / dt2) + " / %" + Math.round(100 * de / dt2), 18) +
+        "%" + Math.round(best.b.reloadBite * 100) +
+        (best.b.dur >= 300 && best.b.dur <= 480 ? "   ✓ 5–8 dk" : ""));
+    }
+  }
+  CONFIG.ammo.missReloadDelay = baseMRD;
+  CONFIG.ammo.poolGrowthPerRound = basePG;
+  console.log("\n  not: 'dolum ısırma' = ıska sonrası atışların yüzde kaçının gecikmeyi beklemek zorunda kaldığı");
+  console.log("       (oyuncu temposu ölçülmüş dağılımdan örnekleniyor: ıska sonrası medyan " +
+    SIM.shotIntervalMiss + " sn).");
+}
+
 header();
 qualityTable();
 const fixedOut = sectionFixed();
 const results = sweep();
 verdict(results, fixedOut);
+if (VARIANTS) variantsSection();
 
 if (EMIT) {
   const out = {

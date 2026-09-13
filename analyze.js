@@ -205,13 +205,24 @@ function threshold(groups, sim) {
   cols(groups, "medyan p", g => p1(pct(stat(g), 0.50)));
   cols(groups, "ortalama p", g => p1(mean(stat(g))));
   cols(groups, "p90", g => p1(pct(stat(g), 0.90)));
+  cols(groups, "ölçülen beceri (isabet/Σq)", g => {
+    const sh = g.shots.filter(x => typeof x.q === "number");
+    const sq = sh.reduce((a, x) => a + x.q, 0);
+    return sq > 0 ? (sh.filter(x => x.hit).length / sq).toFixed(2) : "—";
+  });
   if (sim) {
-    for (const s of sim.skills) {
-      cols(groups, "eşik " + s.optimalThreshold.toFixed(2) + " altı (" + s.name + ")", g => {
-        const a = stat(g);
-        return a.length ? pctS(a.filter(v => v < s.optimalThreshold).length / a.length) : "—";
+    // Sim eşikleri p = beceri × q üzerinden tanımlı. Kayıttaki p, o oturumun
+    // model.skill'iyle hesaplandı; karşılaştırmayı q'ya dönüp sim'in becerisiyle
+    // yeniden ölçekleyerek yapıyoruz (elma-elma).
+    console.log("  " + padr("(karşılaştırma q × sim becerisi üzerinden yeniden ölçeklendi)", LABELW + COLW).trimEnd());
+    for (const sk of sim.skills) {
+      cols(groups, "eşik " + sk.optimalThreshold.toFixed(2) + " altı (" + sk.name + " " + sk.skill + ")", g => {
+        const qs = g.shots.filter(x => typeof x.q === "number").map(x => x.q * sk.skill);
+        if (!qs.length) return "—";
+        return pctS(qs.filter(v => v < sk.optimalThreshold).length / qs.length);
       });
     }
+    cols(groups, "kayıttaki model.skill", g => ((g.config || {}).model || {}).skill);
   }
 
   for (const g of groups) {

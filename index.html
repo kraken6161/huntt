@@ -1280,7 +1280,20 @@ async function copyText(text) {
   return ok;
 }
 
-function downloadJson(text, name) {
+async function downloadJson(text, name) {
+  // claude.ai artifact görüntüleyicisi normal tarayıcı indirmesini engelliyor;
+  // orada varsa platformun kendi kaydetme yolunu kullan (iPhone'da paylaş sayfası)
+  try {
+    if (window.claude && typeof window.claude.use === "function") {
+      const dl = await window.claude.use("downloads");
+      if (dl && typeof dl.save === "function") {
+        await dl.save({ filename: name, data: text });
+        return "kaydedildi";
+      }
+    }
+  } catch (e) {
+    return (e && e.code === "declined") ? "iptal edildi" : "kaydedilemedi";
+  }
   try {
     const blob = new Blob([text], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -1289,8 +1302,8 @@ function downloadJson(text, name) {
     document.body.appendChild(a);
     a.click();
     setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1500);
-    return true;
-  } catch (e) { return false; }
+    return "indiriliyor";
+  } catch (e) { return "indirilemedi"; }
 }
 
 document.getElementById("teleExport").addEventListener("click", async () => {
@@ -1300,17 +1313,17 @@ document.getElementById("teleExport").addEventListener("click", async () => {
   const json = JSON.stringify(data);
   const name = exportFileName(data.meta.configHash);
   const copied = await copyText(json);
-  const saved = downloadJson(json, name);
   updateTeleCount();
-  if (copied) {
-    toast(data.runs.length + " run · " + Math.round(json.length / 1024) + " KB\n" +
-          (saved ? "panoya kopyalandı + indiriliyor" : "panoya kopyalandı") + "\n" + name, 4200);
-  } else {
+  const head = data.runs.length + " run · " + Math.round(json.length / 1024) + " KB\n";
+  if (copied) toast(head + "panoya kopyalandı\n" + name, 5000);
+  else {
     teleJsonEl.value = json;
     teleModalEl.hidden = false;
     teleJsonEl.focus();
     teleJsonEl.setSelectionRange(0, json.length);
   }
+  const saved = await downloadJson(json, name);
+  if (copied) toast(head + "panoya kopyalandı · dosya " + saved + "\n" + name, 5000);
 });
 
 document.getElementById("teleClear").addEventListener("click", () => {

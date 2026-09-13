@@ -92,6 +92,17 @@ function head(groups, title) {
   console.log("  " + "─".repeat(LABELW + COLW * groups.length - 2));
 }
 
+const MIN_SHOTS = 5;                       // bunun altındaki run "yarım" sayılır
+const realRuns = g => g.runs.filter(r => (r.shots || []).length >= MIN_SHOTS);
+function shotGaps(runs) {
+  const gaps = [];
+  for (const r of runs) {
+    const ts = (r.shots || []).map(s => s.t).sort((a, b) => a - b);
+    for (let i = 1; i < ts.length; i++) { const d = ts[i] - ts[i-1]; if (d > 0 && d < 15) gaps.push(d); }
+  }
+  return sorted(gaps);
+}
+
 /* ========================= 0. özet ========================= */
 function summary(groups, files) {
   console.log("\n" + "═".repeat(78));
@@ -115,6 +126,15 @@ function summary(groups, files) {
   cols(groups, "ort. temizlenen tur", g => mean(g.runs.map(r => r.roundsCleared || 0)).toFixed(2));
   cols(groups, "ort. run süresi", g => mmss(mean(g.runs.map(r => r.duration || 0))));
   cols(groups, "ort. kaçan ördek", g => mean(g.runs.map(r => r.escapedCount || 0)).toFixed(1));
+  cols(groups, "atış temposu (medyan)", g => {
+    const gp = shotGaps(realRuns(g));
+    return gp.length ? pct(gp, 0.5).toFixed(2) + " sn" : "—";
+  });
+  cols(groups, "hedefsiz (boşa) atış", g => {
+    const n = g.shots.filter(x => x.p == null).length;
+    return n + " (" + Math.round(100 * n / Math.max(1, g.shots.length)) + "%)";
+  });
+  cols(groups, "yarım run (<" + MIN_SHOTS + " atış)", g => g.runs.length - realRuns(g).length);
   cols(groups, "oyun sürümü", g => [...new Set(g.runs.map(r => r.gameVersion))].join(","));
   cols(groups, "cihaz", g => [...new Set(g.runs.map(r => (r.device || {}).type))].join(","));
 }
@@ -264,6 +284,22 @@ function death(groups) {
     for (let i = 0; i < 5; i++) row += padr("-" + (5 - i) + ": " + (pos[i].length ? mean(pos[i]).toFixed(2) : "—"), 11);
     console.log(row);
 
+    // mermiyi ne tüketti: ıska mı, kaçış mı
+    const cfg = g.config || {}, am = cfg.ammo || {};
+    const mc = am.missCost || 1, ec = am.escapeCost || 0;
+    let missAmmo = 0, escAmmo = 0;
+    for (const r of dead) {
+      missAmmo += (r.shots || []).filter(s => !s.hit).length * mc;
+      escAmmo += (r.duckEvents || []).filter(e => e.ev === "escape").length * ec;
+    }
+    const tot = missAmmo + escAmmo;
+    if (tot) {
+      console.log("     mermiyi ne tüketti: ıska " + missAmmo + " mermi (%" + Math.round(100 * missAmmo / tot) +
+        ")  ·  kaçış " + escAmmo + " mermi (%" + Math.round(100 * escAmmo / tot) + ")" +
+        "   [ıska −" + mc + ", kaçış −" + ec + "]");
+      console.log("     not: bitiş sebebi son damlayı söyler, tüketimin çoğunu değil.");
+    }
+
     // son 10 sn'de kaçan ördek
     const escLate = dead.map(r => {
       const tEnd = r.duration || 0;
@@ -332,20 +368,21 @@ function fatigue(groups) {
     console.log("\n  ── " + g.hash + " ──");
     console.log("     #   başlangıç         süre    atış  isabet%  atış/dk  skor");
     const accs = [], rates = [];
+    const full = realRuns(g);
     g.runs.forEach((r, i) => {
       const shots = (r.shots || []).length;
       const hits = (r.shots || []).filter(s => s.hit).length;
       const acc = shots ? hits / shots : 0;
       const dur = r.duration || 0;
       const rate = dur > 0 ? shots / (dur / 60) : 0;
-      accs.push(acc); rates.push(rate);
+      if (shots >= MIN_SHOTS) { accs.push(acc); rates.push(rate); }
       const ts = String(r.startedAt || "").replace("T", " ").slice(5, 16);
       console.log("     " + pad(i + 1, 2) + "  " + padr(ts, 17) + padr(mmss(dur), 8) +
         pad(shots, 5) + pad(Math.round(acc * 100) + "%", 8) + pad(rate.toFixed(1), 9) +
-        pad(r.score || 0, 7) + "  " + bar(acc, 1, 12));
+        pad(r.score || 0, 7) + "  " + (shots >= MIN_SHOTS ? bar(acc, 1, 12) : "yarım — trende dahil değil"));
     });
-    if (g.runs.length >= 4) {
-      const h = Math.floor(g.runs.length / 2);
+    if (accs.length >= 4) {
+      const h = Math.floor(accs.length / 2);
       const slope = arr => {
         const n = arr.length, xm = (n - 1) / 2, ym = mean(arr);
         let num = 0, den = 0;
@@ -359,7 +396,8 @@ function fatigue(groups) {
         " → son yarı " + mean(rates.slice(h)).toFixed(1) +
         "   (eğim " + (slope(rates) >= 0 ? "+" : "") + slope(rates).toFixed(2) + "/run)");
     } else {
-      console.log("     (trend için en az 4 run gerek)");
+      console.log("     (trend için en az 4 dolu run gerek — şu an " + accs.length +
+        (full.length !== g.runs.length ? "; " + (g.runs.length - full.length) + " yarım run sayılmadı" : "") + ")");
     }
   }
 }

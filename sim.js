@@ -34,11 +34,11 @@ const SIM = {
   maxRounds: 60,
   maxRunSeconds: 2400,
 
-  // atış kalitesi modeli:  p = beceri × boyut × hız × merkez
+  // atış kalitesi modeli — varsayılanlar; CONFIG.model varsa oradan gelir
   quality: {
-    sizeExp:       0.80,  // p ∝ (ördek ölçeği)^sizeExp
-    speedExp:      0.60,  // p ∝ (temel hız / ördek hızı)^speedExp
-    centerPenalty: 0.35,  // ekranın en uzak köşesinde p bu oranda düşer
+    sizeExp:       0.80,
+    speedExp:      0.60,
+    centerPenalty: 0.35,
     minP:          0.02,
     maxP:          0.98
   },
@@ -77,6 +77,13 @@ function loadConfig(file) {
 }
 const CONFIG_FILE = path.resolve(__dirname, args.config || "index.html");
 const CONFIG = loadConfig(CONFIG_FILE);
+/* kalite modeli oyunla aynı olsun: index.html'deki CONFIG.model kazanır */
+if (CONFIG.model) {
+  for (const k of ["sizeExp", "speedExp", "centerPenalty"]) {
+    if (typeof CONFIG.model[k] === "number") SIM.quality[k] = CONFIG.model[k];
+  }
+}
+const EMIT = args.emit || "";
 
 /* ---- yardımcılar ---- */
 function mulberry32(a) {
@@ -104,6 +111,7 @@ const spawnMul = r => Math.max(0.12, Math.pow(1 - CONFIG.difficulty.spawnGrowth,
 const sizeMul  = r => Math.max(CONFIG.duck.minScale, Math.pow(1 - CONFIG.difficulty.sizeShrink, r - 1));
 const goalFor  = r => Math.round(CONFIG.round.goal + CONFIG.round.goalGrowth * (r - 1));
 const missCost = () => Math.max(1, Math.round(CONFIG.ammo.missCost === undefined ? 1 : CONFIG.ammo.missCost));
+const escapeCost = () => Math.max(0, Math.round(CONFIG.ammo.escapeCost === undefined ? 0 : CONFIG.ammo.escapeCost));
 
 /* Turu geçmek için teorik olarak gereken isabet oranı */
 function neededAcc(r) {
@@ -187,10 +195,12 @@ function simulateRun(opts, seed) {
   const rnd = mulberry32(seed);
   const dt = SIM.dt;
   const cost = missCost();
+  const escCost = escapeCost();
 
   let t = 0, round = 1, runScore = 0;
   let ammo = Math.max(1, Math.round(CONFIG.ammo.poolSize));
   let shots = 0, hits = 0, escaped = 0, escapedUnshot = 0;
+  let deathBy = "";
   let peakCombo = 1, comboSum = 0, pSum = 0, holdTime = 0, playTime = 0;
   let sinceAnyShot = 0, stalled = false, alive = true;
   const rounds = [], ammoSeries = [];
@@ -227,6 +237,8 @@ function simulateRun(opts, seed) {
           escaped++;
           if (!ducks[i].shotAt) escapedUnshot++;
           ducks.splice(i, 1);
+          ammo -= escCost;                       // kaçan ördek mermi götürür
+          if (ammo <= 0) { roundOver = true; alive = false; deathBy = "kaçış"; }
         }
       }
 
@@ -271,13 +283,13 @@ function simulateRun(opts, seed) {
             combo = 1;
           }
           if (roundHits >= goal) { roundOver = true; cleared = true; }
-          else if (ammo <= 0) { roundOver = true; alive = false; }
+          else if (ammo <= 0) { roundOver = true; alive = false; deathBy = "atış"; }
         } else if (candidates === 0 && opts.mode === "quality") {
           /* ördek yok — bekleme sayılmaz */
         }
       }
 
-      if (sinceAnyShot >= SIM.stallSeconds) { roundOver = true; alive = false; stalled = true; }
+      if (sinceAnyShot >= SIM.stallSeconds) { roundOver = true; alive = false; stalled = true; deathBy = "tıkanma"; }
     }
 
     rounds.push({ round, goal, cleared, roundT, roundShots, roundHits, roundScore, ammoStart, ammoEnd: ammo });
@@ -289,7 +301,7 @@ function simulateRun(opts, seed) {
     duration: t, roundReached: round, roundsCleared: rounds.filter(r => r.cleared).length,
     score: runScore, shots, hits, misses: shots - hits, escaped, escapedUnshot,
     peakCombo, avgCombo: hits ? comboSum / hits : 1, avgShotP: shots ? pSum / shots : 0,
-    holdShare: playTime ? holdTime / playTime : 0, stalled, rounds, ammoSeries
+    holdShare: playTime ? holdTime / playTime : 0, stalled, deathBy, rounds, ammoSeries
   };
 }
 
@@ -309,7 +321,10 @@ function batch(opts, n, seedBase) {
     avgP: mean(runs.map(r => r.avgShotP)),
     combo: mean(runs.map(r => r.avgCombo)),
     peak: mean(runs.map(r => r.peakCombo)),
-    stall: runs.filter(r => r.stalled).length / runs.length
+    stall: runs.filter(r => r.stalled).length / runs.length,
+    deathEscape: runs.filter(r => r.deathBy === "kaçış").length / runs.length,
+    deathShot: runs.filter(r => r.deathBy === "atış").length / runs.length,
+    escaped: mean(runs.map(r => r.escaped))
   };
 }
 
@@ -324,7 +339,7 @@ function header() {
   console.log("config: " + path.basename(CONFIG_FILE) +
     "  ·  havuz " + C.ammo.poolSize + "  ·  isabet −1/+" + C.ammo.refundOnHit +
     " (net " + (1 - C.ammo.refundOnHit === 0 ? "0" : -(1 - C.ammo.refundOnHit)) + ")" +
-    "  ·  ıska −" + missCost());
+    "  ·  ıska −" + missCost() + "  ·  kaçan ördek −" + escapeCost());
   console.log("hedef " + C.round.goal + " (+" + C.round.goalGrowth + "/tur)  ·  kombo +" + C.combo.step +
     " / max x" + C.combo.max + " / " + C.combo.decayTime + "sn'de bir kademe düşer  ·  ördek puanı " + C.score.perDuck);
   console.log("zorluk/tur: hız +" + Math.round(C.difficulty.speedGrowth * 100) + "%  spawn −" +
@@ -469,6 +484,9 @@ function verdict(results, fixedOut) {
       "  ·  vurulmadan kaçan " + best.b.escapedUnshot.toFixed(1) +
       "  ·  ıska %" + Math.round((1 - best.b.acc) * 100) +
       "  ·  süre " + mmss(best.b.dur));
+    console.log("    ölüm sebebi       : atış %" + Math.round(best.b.deathShot * 100) +
+      "  ·  kaçış %" + Math.round(best.b.deathEscape * 100) +
+      "  ·  tıkanma %" + Math.round(best.b.stall * 100));
   }
 
   console.log("\n" + line());
@@ -507,3 +525,24 @@ qualityTable();
 const fixedOut = sectionFixed();
 const results = sweep();
 verdict(results, fixedOut);
+
+if (EMIT) {
+  const out = {
+    generatedAt: new Date().toISOString(),
+    configHash: null,
+    ammo: { poolSize: CONFIG.ammo.poolSize, missCost: missCost(), escapeCost: escapeCost(),
+            refundOnHit: CONFIG.ammo.refundOnHit },
+    model: { sizeExp: SIM.quality.sizeExp, speedExp: SIM.quality.speedExp,
+             centerPenalty: SIM.quality.centerPenalty },
+    skills: results.map(r => ({
+      name: r.sk.name, skill: r.sk.skill,
+      optimalThreshold: r.best.thr, optimalScore: Math.round(r.best.b.score),
+      cleanThreshold: r.clean.thr, cleanScore: Math.round(r.clean.b.score),
+      zeroScore: Math.round(r.rows[0].b.score),
+      holdShareAtOptimum: +r.best.b.hold.toFixed(3),
+      durationAtOptimum: Math.round(r.best.b.dur)
+    }))
+  };
+  fs.writeFileSync(path.resolve(__dirname, EMIT), JSON.stringify(out, null, 2));
+  console.log("→ " + EMIT + " yazıldı (analyze.js bunu okur)\n");
+}

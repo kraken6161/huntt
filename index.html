@@ -81,6 +81,44 @@
     color: #dbe7f5; font: inherit;
   }
   .dbg-btns button:active { background: rgba(255,255,255,.16); }
+
+  /* ---- telemetri ---- */
+  #teleBar {
+    position: absolute; left: 8px; bottom: 8px; z-index: 18;
+    display: flex; gap: 6px; align-items: center;
+    font: 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  #teleBar button {
+    padding: 7px 9px; border-radius: 9px; cursor: pointer;
+    border: 1px solid rgba(255,255,255,.22); background: rgba(10,14,22,.7);
+    color: #cfe0f5; font: inherit; backdrop-filter: blur(4px);
+  }
+  #teleBar button:active { background: rgba(255,255,255,.16); }
+  #teleBar b { color: #ffd166; font-weight: 700; }
+  #teleToast {
+    position: absolute; left: 50%; bottom: 54px; transform: translateX(-50%);
+    z-index: 22; max-width: calc(100% - 24px);
+    padding: 9px 13px; border-radius: 10px; text-align: center;
+    background: rgba(9,13,20,.94); border: 1px solid rgba(255,255,255,.2);
+    color: #dbe7f5; font: 11px/1.35 ui-monospace, Menlo, monospace;
+    opacity: 0; transition: opacity .18s; pointer-events: none;
+  }
+  #teleToast.show { opacity: 1; }
+  #teleModal {
+    position: absolute; inset: 0; z-index: 30; display: flex; flex-direction: column;
+    gap: 8px; padding: 14px; background: rgba(6,10,18,.95);
+  }
+  #teleModal[hidden] { display: none; }
+  #teleModal p { margin: 0; font: 11px/1.4 ui-monospace, Menlo, monospace; color: #b9c9dd; }
+  #teleModal textarea {
+    flex: 1; width: 100%; resize: none; border-radius: 8px; padding: 8px;
+    background: #0d1420; color: #cfe0f5; border: 1px solid rgba(255,255,255,.2);
+    font: 10px/1.3 ui-monospace, Menlo, monospace;
+  }
+  #teleModal button {
+    padding: 9px; border-radius: 9px; cursor: pointer; font: inherit;
+    border: 1px solid rgba(255,255,255,.22); background: rgba(255,255,255,.08); color: #dbe7f5;
+  }
 </style>
 </head>
 <body>
@@ -88,6 +126,16 @@
   <canvas id="game"></canvas>
   <button id="dbgToggle" aria-label="Debug paneli">⚙</button>
   <div id="dbgPanel" hidden></div>
+  <div id="teleBar">
+    <button id="teleExport" title="Telemetriyi panoya kopyala ve indir">⬇ Export <b id="teleCount">0</b></button>
+    <button id="teleClear" title="Kayıtlı telemetriyi sil">🗑</button>
+  </div>
+  <div id="teleToast"></div>
+  <div id="teleModal" hidden>
+    <p>Panoya kopyalanamadı — metni seçip elle kopyalayabilirsin.</p>
+    <textarea id="teleJson" readonly></textarea>
+    <button id="teleModalClose">Kapat</button>
+  </div>
 </div>
 
 <script>
@@ -121,6 +169,7 @@ const CONFIG = {
     poolSize:       15,    // tur boyunca ortak mermi havuzu
     refundOnHit:    1,     // isabette geri gelen mermi (atış maliyeti hep 1 → net 0)
     missCost:       2,     // ıskanın toplam mermi maliyeti
+    escapeCost:     1,     // kaçan ördeğin mermi maliyeti
     lowWarning:     3,     // bu değerin altında görsel uyarı
     refillEachRound: 1     // 1: her tur havuz dolar, 0: havuz run boyunca taşınır
   },
@@ -143,8 +192,19 @@ const CONFIG = {
     speedGrowth:    0.12,  // tur başına hız artışı
     spawnGrowth:    0.08,  // tur başına spawn aralığının kısalması
     sizeShrink:     0.05   // tur başına ördek boyutunun küçülmesi
+  },
+  /* Atış kalitesi modeli — denge sayısı değil, telemetri/analiz için.
+     sim.js de bu değerleri okur; p = skill × ölçek^sizeExp ×
+     (temel hız/hız)^speedExp × (1 − centerPenalty × merkeze uzaklık) */
+  model: {
+    skill:          0.75,
+    sizeExp:        0.80,
+    speedExp:       0.60,
+    centerPenalty:  0.35
   }
 };
+
+const GAME_VERSION = "0.3.0";   // telemetri dosyalarına yazılır, elle artır
 
 /* Debug panelindeki slider'lar */
 const SLIDERS = [
@@ -152,6 +212,7 @@ const SLIDERS = [
   { path: "ammo.poolSize",           label: "Havuz boyutu",        min: 1,   max: 40,   step: 1 },
   { path: "ammo.refundOnHit",        label: "İsabette geri gelen", min: 0,   max: 3,    step: 1 },
   { path: "ammo.missCost",           label: "Iska maliyeti",       min: 1,   max: 5,    step: 1 },
+  { path: "ammo.escapeCost",         label: "Kaçış maliyeti",      min: 0,   max: 5,    step: 1 },
   { path: "ammo.lowWarning",         label: "Uyarı eşiği",         min: 0,   max: 10,   step: 1 },
   { path: "ammo.refillEachRound",    label: "Her tur dolsun (0/1)",min: 0,   max: 1,    step: 1 },
   { group: "Tur" },
@@ -179,7 +240,12 @@ const SLIDERS = [
   { group: "Zorluk artışı" },
   { path: "difficulty.speedGrowth",  label: "Tur hız artışı",      min: 0,   max: 0.5,  step: 0.01 },
   { path: "difficulty.spawnGrowth",  label: "Tur spawn hızlanması",min: 0,   max: 0.5,  step: 0.01 },
-  { path: "difficulty.sizeShrink",   label: "Tur boyut küçülmesi", min: 0,   max: 0.3,  step: 0.01 }
+  { path: "difficulty.sizeShrink",   label: "Tur boyut küçülmesi", min: 0,   max: 0.3,  step: 0.01 },
+  { group: "Atış kalitesi modeli (telemetri)" },
+  { path: "model.skill",             label: "Beceri (p tavanı)",   min: 0.1, max: 1,    step: 0.01 },
+  { path: "model.sizeExp",           label: "Boyut üsteli",        min: 0,   max: 2,    step: 0.05 },
+  { path: "model.speedExp",          label: "Hız üsteli",          min: 0,   max: 2,    step: 0.05 },
+  { path: "model.centerPenalty",     label: "Merkez cezası",       min: 0,   max: 0.9,  step: 0.05 }
 ];
 
 const DEFAULTS = JSON.parse(JSON.stringify(CONFIG));
@@ -238,6 +304,7 @@ const game = {
   comboPulse: 0,       // kombo değişiminde görsel tepki
   comboFlash: "up",    // "up" | "down"
   ammoPulse: 0,
+  escapeFlash: 0,
   runShots: 0,
   runHits: 0,
   roundShots: 0,
@@ -258,6 +325,118 @@ const game = {
   fps: 0
 };
 
+/* ========================== telemetri ========================== */
+const TELE_KEY = "duckproto.telemetry.v1";
+const TELE_MAX_RUNS = 60;
+
+function hashConfig(cfg) {                       // FNV-1a 32-bit → kısa hash
+  const str = JSON.stringify(cfg);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return h.toString(36).padStart(7, "0").slice(-7);
+}
+
+function deviceInfo() {
+  const ua = navigator.userAgent || "";
+  const type = /iPad/i.test(ua) ? "iPad" : /iPhone|iPod/i.test(ua) ? "iPhone" :
+               /Android/i.test(ua) ? "Android" : /Mobile/i.test(ua) ? "Mobile" : "Desktop";
+  return {
+    type, ua,
+    touch: (navigator.maxTouchPoints || 0) > 0,
+    screen: { w: screen.width, h: screen.height, dpr: +(window.devicePixelRatio || 1).toFixed(2) },
+    stage: { w: W, h: H }
+  };
+}
+
+const telemetry = {
+  run: null,
+  saveFailed: false,
+
+  load() {
+    try { const raw = localStorage.getItem(TELE_KEY); return raw ? JSON.parse(raw) : { runs: [] }; }
+    catch (e) { return { runs: [] }; }
+  },
+  save(store) {
+    while (store.runs.length > TELE_MAX_RUNS) store.runs.shift();
+    for (let i = 0; i < 4; i++) {
+      try { localStorage.setItem(TELE_KEY, JSON.stringify(store)); this.saveFailed = false; return true; }
+      catch (e) { store.runs.splice(0, Math.max(1, Math.ceil(store.runs.length / 4))); }
+    }
+    this.saveFailed = true;
+    return false;
+  },
+  count() { return this.load().runs.length; },
+  clear() { try { localStorage.removeItem(TELE_KEY); } catch (e) {} this.run = null; },
+  now() { return this.run ? +((performance.now() - this.run._t0) / 1000).toFixed(3) : 0; },
+
+  startRun() {
+    if (this.run) this.endRun("abandoned");
+    this.run = {
+      startedAt: new Date().toISOString(),
+      _t0: performance.now(),
+      gameVersion: GAME_VERSION,
+      configHash: hashConfig(CONFIG),
+      config: JSON.parse(JSON.stringify(CONFIG)),
+      device: deviceInfo(),
+      shots: [], duckEvents: [], rounds: [], _round: null
+    };
+  },
+  startRound(round, goal, ammo) {
+    if (!this.run) return;
+    this.endRoundRecord(false);
+    const t = this.now();
+    this.run._round = {
+      round, goal, t0: t, dur: 0, score: 0, shots: 0, hits: 0, escaped: 0, cleared: false,
+      ammoCurve: [[t, ammo]], comboCurve: [[t, 1]]
+    };
+  },
+  ammoAt(ammo) { const r = this.run && this.run._round; if (r) r.ammoCurve.push([this.now(), ammo]); },
+  comboAt(c)   { const r = this.run && this.run._round; if (r) r.comboCurve.push([this.now(), +c.toFixed(2)]); },
+  addScore(v)  { const r = this.run && this.run._round; if (r) r.score += v; },
+  duckEvent(ev, d) {
+    if (!this.run || game.state !== STATE.PLAYING) return;
+    this.run.duckEvents.push({
+      t: this.now(), ev, id: d.id, round: game.round,
+      scale: +d.scale.toFixed(3), speed: Math.round(d.speed),
+      x: Math.round(d.x), y: Math.round(d.y)
+    });
+    const r = this.run._round;
+    if (r) { if (ev === "hit") r.hits++; else if (ev === "escape") r.escaped++; }
+  },
+  shot(rec) {
+    if (!this.run) return;
+    this.run.shots.push(rec);
+    if (this.run._round) this.run._round.shots++;
+  },
+  endRoundRecord(cleared) {
+    const r = this.run && this.run._round;
+    if (!r) return;
+    r.dur = +(this.now() - r.t0).toFixed(2);
+    r.cleared = !!cleared;
+    this.run.rounds.push(r);
+    this.run._round = null;
+  },
+  endRun(reason) {
+    if (!this.run) return;
+    this.endRoundRecord(false);
+    const r = this.run;
+    r.duration = +this.now().toFixed(2);
+    r.endReason = reason || "";
+    r.roundReached = game.round;
+    r.roundsCleared = r.rounds.filter(x => x.cleared).length;
+    r.score = game.runScore;
+    r.shotCount = r.shots.length;
+    r.hitCount = r.shots.filter(x => x.hit).length;
+    r.escapedCount = r.duckEvents.filter(x => x.ev === "escape").length;
+    delete r._round; delete r._t0;
+    const store = this.load();
+    store.runs.push(r);
+    this.save(store);
+    this.run = null;
+    updateTeleCount();
+  }
+};
+
 /* --- turdan tura ölçekler --- */
 const speedMul = () => Math.pow(1 + CONFIG.difficulty.speedGrowth, game.round - 1);
 const spawnMul = () => Math.max(0.12, Math.pow(1 - CONFIG.difficulty.spawnGrowth, game.round - 1));
@@ -273,6 +452,20 @@ const neededAcc = () => {
   const maxMiss = Math.floor(budget / cost);
   return maxMiss <= 0 ? 1 : game.goal / (game.goal + maxMiss);
 };
+
+const hudH = () => 156 * S;
+
+/* Atış kalitesi: boyut × hız × merkeze uzaklık (0..1, beceriden bağımsız) */
+function shotQuality(d) {
+  const m = CONFIG.model;
+  const sizeF = Math.pow(Math.max(0.01, d.scale), m.sizeExp);
+  const spdF = Math.pow(CONFIG.duck.speed / Math.max(1, d.speed), m.speedExp);
+  const cx = W / 2, cy = hudH() + (H - hudH()) / 2;
+  const half = Math.max(1, Math.hypot(W / 2, (H - hudH()) / 2));
+  const dist = Math.min(1, Math.hypot(d.x - cx, d.y - cy) / half);
+  return clamp(sizeF * spdF * (1 - m.centerPenalty * dist), 0, 1.5);
+}
+const predictedP = d => clamp(CONFIG.model.skill * shotQuality(d), 0.02, 0.98);
 
 const spawnDelay = () => {
   const base = CONFIG.spawn.interval * spawnMul();
@@ -291,6 +484,8 @@ function makeClouds() {
 }
 
 /* ========================== ördekler ========================== */
+let duckId = 0;
+
 function spawnDuck() {
   const c = CONFIG.duck;
   const w = duckW(), h = duckH();
@@ -312,7 +507,8 @@ function spawnDuck() {
     dir = { x: (fromLeft ? 1 : -1) * Math.cos(a), y: -Math.sin(a) };
   }
 
-  game.ducks.push({
+  const duck = {
+    id: ++duckId,
     ox, oy, dir,
     perp: { x: -dir.y, y: dir.x },
     x: ox, y: oy, px: ox,
@@ -322,7 +518,9 @@ function spawnDuck() {
     scale: sizeMul(),
     falling: false, vx: 0, vy: 0, rot: 0, spin: 0,
     entered: false
-  });
+  };
+  game.ducks.push(duck);
+  telemetry.duckEvent("spawn", duck);
 }
 
 function updateDucks(dt) {
@@ -355,7 +553,20 @@ function updateDucks(dt) {
       game.ducks.splice(i, 1);
       if (game.state === STATE.PLAYING) {
         game.escaped++;
-        addPopup(clamp(d.x, 40, W - 40), clamp(d.y, 176 * S, H - 60), "KAÇTI", "#8fa3bd", 0.85);
+        telemetry.duckEvent("escape", d);
+        const ex = clamp(d.x, 62 * S, W - 62 * S), ey = clamp(d.y, 176 * S, H - 60);
+        const escCost = Math.max(0, Math.round(CONFIG.ammo.escapeCost));
+        if (escCost > 0 && game.endTimer < 0) {
+          game.ammo -= escCost;
+          game.ammoPulse = 1;
+          game.escapeFlash = 1;
+          telemetry.ammoAt(game.ammo);
+          addPopup(ex, ey, "KAÇTI  −" + escCost, "#ff9f43", 1.05);
+          game.shots.push({ x: ex, y: ey, age: 0, hit: false, escape: true });
+          if (game.ammo <= 0) endRun("Kaçan ördekler mermiyi bitirdi");
+        } else {
+          addPopup(ex, ey, "KAÇTI", "#8fa3bd", 0.85);
+        }
       }
     }
   }
@@ -367,10 +578,18 @@ function duckRect(d) {
 }
 
 /* ========================== atış & mermi ekonomisi ========================== */
+function nearestDuck(x, y) {                     // ıskada "niyet edilen" hedef
+  let best = null, bd = 150 * S;
+  for (const d of game.ducks) {
+    if (d.falling) continue;
+    const dist = Math.hypot(d.x - x, d.y - y);
+    if (dist < bd) { bd = dist; best = d; }
+  }
+  return best;
+}
+
 function shoot(x, y) {
-  game.ammo -= 1;                       // her atış 1 mermi
-  game.runShots++; game.roundShots++;
-  game.sinceShot = 0;
+  const comboBefore = game.combo;
 
   let hit = null;
   for (let i = game.ducks.length - 1; i >= 0; i--) {
@@ -379,6 +598,22 @@ function shoot(x, y) {
     const r = duckRect(d);
     if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) { hit = d; break; }
   }
+
+  // model tahmini, ördek düşmeden önce hesaplanır
+  const target = hit || nearestDuck(x, y);
+  const tRec = target ? {
+    id: target.id,
+    w: Math.round(duckW()), h: Math.round(duckH()),
+    scale: +target.scale.toFixed(3), speed: Math.round(target.speed),
+    x: Math.round(target.x), y: Math.round(target.y),
+    dist: Math.round(Math.hypot(target.x - x, target.y - y))
+  } : null;
+  const tp = target ? +predictedP(target).toFixed(3) : null;
+  const tq = target ? +shotQuality(target).toFixed(3) : null;
+
+  game.ammo -= 1;                       // her atış 1 mermi
+  game.runShots++; game.roundShots++;
+  game.sinceShot = 0;
 
   if (hit) {
     hit.falling = true;
@@ -392,6 +627,8 @@ function shoot(x, y) {
     const gain = Math.round(CONFIG.score.perDuck * game.combo);
     game.roundScore += gain;
     game.runScore += gain;
+    telemetry.duckEvent("hit", hit);
+    telemetry.addScore(gain);
     addPopup(hit.x, hit.y - 18, "+" + gain, "#ffd166", 1.05);
     if (CONFIG.ammo.refundOnHit > 0) addPopup(hit.x, hit.y + 6, "+" + CONFIG.ammo.refundOnHit + " mermi", "#7fd4ff", 0.7);
 
@@ -406,6 +643,14 @@ function shoot(x, y) {
     game.ammoPulse = 1;
   }
 
+  telemetry.ammoAt(game.ammo);
+  telemetry.shot({
+    t: telemetry.now(), round: game.round, hit: !!hit,
+    x: Math.round(x), y: Math.round(y),
+    p: tp, q: tq, target: tRec,
+    combo: +comboBefore.toFixed(2), ammo: game.ammo
+  });
+
   if (game.hits >= game.goal) finishRound();
   else if (game.ammo <= 0) endRun("Mermi tükendi");
 }
@@ -414,6 +659,7 @@ function setCombo(value, dir) {
   if (Math.abs(value - game.combo) > 0.001) {
     game.comboPulse = 1;
     game.comboFlash = dir;
+    telemetry.comboAt(value);
   }
   game.combo = value;
 }
@@ -430,6 +676,7 @@ function startRun() {
   game.runShots = 0; game.runHits = 0; game.escaped = 0;
   game.runTime = 0;
   game.ammo = Math.max(1, Math.round(CONFIG.ammo.poolSize));
+  telemetry.startRun();
   startRound();
 }
 
@@ -451,8 +698,10 @@ function startRound() {
   if (game.ammo <= 0) {              // taşımalı modda havuz boş kaldıysa run biter
     game.state = STATE.GAMEOVER;
     game.endReasonText = "Mermi tükendi";
+    telemetry.endRun(game.endReasonText);
     return;
   }
+  telemetry.startRound(game.round, game.goal, game.ammo);
   game.state = STATE.PLAYING;
 }
 
@@ -494,7 +743,9 @@ function updateRound(dt) {
     if (game.endTimer <= 0) {
       if (game.endReason === "run") {
         game.state = STATE.GAMEOVER;
+        telemetry.endRun(game.endReasonText || "Mermi tükendi");
       } else {
+        telemetry.endRoundRecord(true);
         game.state = STATE.ROUNDOVER;
         game.breakTimer = CONFIG.round.breakDuration / 1000;
       }
@@ -626,12 +877,16 @@ function drawShots(dt) {
     s.age += dt;
     const t = s.age / 0.35;
     if (t >= 1) { game.shots.splice(i, 1); continue; }
-    const size = (14 + t * 34) * S;
+    const size = (14 + t * (s.escape ? 52 : 34)) * S;
     ctx.save();
     ctx.globalAlpha = 1 - t;
-    ctx.strokeStyle = s.hit ? "#ffd166" : "#ff7b6b";
-    ctx.lineWidth = 3 * S;
+    ctx.strokeStyle = s.escape ? "#ff9f43" : (s.hit ? "#ffd166" : "#ff7b6b");
+    ctx.lineWidth = (s.escape ? 4 : 3) * S;
     ctx.strokeRect(s.x - size / 2, s.y - size / 2, size, size);
+    if (s.escape) {
+      ctx.lineWidth = 2 * S;
+      ctx.strokeRect(s.x - size * 0.28, s.y - size * 0.28, size * 0.56, size * 0.56);
+    }
     ctx.restore();
   }
 }
@@ -680,9 +935,9 @@ function drawHUD(dt) {
 
   // ---- üst şerit ----
   ctx.fillStyle = "rgba(6,10,18,.66)";
-  ctx.fillRect(0, 0, W, 156 * S);
+  ctx.fillRect(0, 0, W, hudH());
   ctx.fillStyle = "rgba(255,255,255,.12)";
-  ctx.fillRect(0, 156 * S, W, 1);
+  ctx.fillRect(0, hudH(), W, 1);
 
   // run skoru
   ctx.textAlign = "left";
@@ -775,6 +1030,17 @@ function drawHUD(dt) {
 
   ctx.restore();
 
+  // kaçış flaşı
+  if (game.escapeFlash > 0) {
+    game.escapeFlash = Math.max(0, game.escapeFlash - dt * 2.5);
+    ctx.save();
+    ctx.globalAlpha = game.escapeFlash * 0.5;
+    ctx.strokeStyle = "#ff9f43";
+    ctx.lineWidth = 10 * S;
+    ctx.strokeRect(5 * S, 5 * S, W - 10 * S, H - 10 * S);
+    ctx.restore();
+  }
+
   // düşük mermi çerçevesi
   if (low && game.state === STATE.PLAYING) {
     ctx.save();
@@ -803,7 +1069,8 @@ function drawOverlay() {
     L("DUCK PROTO", -96, 13, "#7fd4ff", "700");
     L("ÖRDEK AVI", -66, 34, "#ffffff", "700");
     L(CONFIG.ammo.poolSize + " mermilik ortak havuz", -18, 13, "#b9c9dd");
-    L("isabet net 0, ıska −" + Math.round(CONFIG.ammo.missCost) + " mermi", 2, 13, "#b9c9dd");
+    L("isabet net 0  ·  ıska −" + Math.round(CONFIG.ammo.missCost) +
+      "  ·  kaçan ördek −" + Math.round(CONFIG.ammo.escapeCost), 2, 13, "#b9c9dd");
     L("tur hedefi: " + goalFor(1) + " ördek (+" + CONFIG.round.goalGrowth + "/tur)", 22, 13, "#b9c9dd");
     L("kombo " + CONFIG.combo.decayTime + " sn ateş edilmezse düşer", 42, 13, "#b9c9dd");
     L("BAŞLAMAK İÇİN DOKUN", 92, 15, "#ffd166", "700");
@@ -949,8 +1216,123 @@ dbgToggle.addEventListener("click", () => {
   if (!dbgPanel.hidden) { syncSliders(); updateDebugStats(); }
 });
 
+/* ========================== telemetri: export / temizle ========================== */
+const teleCountEl = document.getElementById("teleCount");
+const teleToastEl = document.getElementById("teleToast");
+const teleModalEl = document.getElementById("teleModal");
+const teleJsonEl = document.getElementById("teleJson");
+
+function updateTeleCount() {
+  const n = telemetry.count();
+  teleCountEl.textContent = n + (telemetry.saveFailed ? "!" : "");
+}
+
+let toastTimer = 0;
+function toast(msg, ms) {
+  teleToastEl.textContent = msg;
+  teleToastEl.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => teleToastEl.classList.remove("show"), ms || 2600);
+}
+
+function buildExport() {
+  const store = telemetry.load();
+  return {
+    meta: {
+      exportedAt: new Date().toISOString(),
+      gameVersion: GAME_VERSION,
+      configHash: hashConfig(CONFIG),
+      config: JSON.parse(JSON.stringify(CONFIG)),
+      device: deviceInfo(),
+      runCount: store.runs.length
+    },
+    runs: store.runs
+  };
+}
+
+function exportFileName(hash) {
+  const d = new Date(), z = n => String(n).padStart(2, "0");
+  return "telemetry-" + d.getFullYear() + "-" + z(d.getMonth() + 1) + "-" + z(d.getDate()) +
+         "-" + z(d.getHours()) + z(d.getMinutes()) + "-" + hash + ".json";
+}
+
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); return true; }
+  } catch (e) { /* aşağıdaki yedeğe düş */ }
+  // iOS Safari yedeği: seçilebilir textarea + execCommand
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;";
+  document.body.appendChild(ta);
+  let ok = false;
+  try {
+    const range = document.createRange();
+    range.selectNodeContents(ta);
+    const sel = window.getSelection();
+    sel.removeAllRanges(); sel.addRange(range);
+    ta.setSelectionRange(0, text.length);
+    ok = document.execCommand("copy");
+    sel.removeAllRanges();
+  } catch (e) { ok = false; }
+  document.body.removeChild(ta);
+  return ok;
+}
+
+function downloadJson(text, name) {
+  try {
+    const blob = new Blob([text], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = name; a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1500);
+    return true;
+  } catch (e) { return false; }
+}
+
+document.getElementById("teleExport").addEventListener("click", async () => {
+  if (telemetry.run) telemetry.endRun("export-sırasında-yarım");   // yarım run da kaydedilsin
+  const data = buildExport();
+  if (!data.runs.length) { toast("Kayıtlı run yok — önce biraz oyna."); return; }
+  const json = JSON.stringify(data);
+  const name = exportFileName(data.meta.configHash);
+  const copied = await copyText(json);
+  const saved = downloadJson(json, name);
+  updateTeleCount();
+  if (copied) {
+    toast(data.runs.length + " run · " + Math.round(json.length / 1024) + " KB\n" +
+          (saved ? "panoya kopyalandı + indiriliyor" : "panoya kopyalandı") + "\n" + name, 4200);
+  } else {
+    teleJsonEl.value = json;
+    teleModalEl.hidden = false;
+    teleJsonEl.focus();
+    teleJsonEl.setSelectionRange(0, json.length);
+  }
+});
+
+document.getElementById("teleClear").addEventListener("click", () => {
+  const n = telemetry.count();
+  if (!n) { toast("Zaten boş."); return; }
+  if (!confirm(n + " run silinecek. Emin misin?")) return;
+  telemetry.clear();
+  updateTeleCount();
+  toast(n + " run silindi.");
+});
+
+document.getElementById("teleModalClose").addEventListener("click", () => { teleModalEl.hidden = true; });
+
+// sekme kapanırken yarım run kaybolmasın
+window.addEventListener("pagehide", () => { if (telemetry.run) telemetry.endRun("abandoned"); });
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden" && telemetry.run) telemetry.endRun("abandoned");
+});
+
 /* ========================== başlat ========================== */
 buildDebugPanel();
+updateTeleCount();
 resize();
 makeClouds();
 game.goal = goalFor(1);

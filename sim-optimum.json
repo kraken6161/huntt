@@ -1,0 +1,50 @@
+{
+  "generatedAt": "2026-09-13T10:59:48.173Z",
+  "configHash": null,
+  "ammo": {
+    "poolSize": 15,
+    "missCost": 2,
+    "escapeCost": 1,
+    "refundOnHit": 1
+  },
+  "model": {
+    "sizeExp": 0.8,
+    "speedExp": 0.6,
+    "centerPenalty": 0.35
+  },
+  "skills": [
+    {
+      "name": "düşük",
+      "skill": 0.55,
+      "optimalThreshold": 0.3,
+      "optimalScore": 790,
+      "cleanThreshold": 0.3,
+      "cleanScore": 790,
+      "zeroScore": 789,
+      "holdShareAtOptimum": 0,
+      "durationAtOptimum": 10
+    },
+    {
+      "name": "orta",
+      "skill": 0.75,
+      "optimalThreshold": 0.5,
+      "optimalScore": 2159,
+      "cleanThreshold": 0.5,
+      "cleanScore": 2159,
+      "zeroScore": 2114,
+      "holdShareAtOptimum": 0.08,
+      "durationAtOptimum": 20
+    },
+    {
+      "name": "yüksek",
+      "skill": 0.92,
+      "optimalThreshold": 0.55,
+      "optimalScore": 4019,
+      "cleanThreshold": 0.55,
+      "cleanScore": 4019,
+      "zeroScore": 3942,
+      "holdShareAtOptimum": 0.039,
+      "durationAtOptimum": 30
+    }
+  ]
+}
